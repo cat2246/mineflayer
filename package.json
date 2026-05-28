@@ -10,7 +10,8 @@
     "pretest": "npm run lint",
     "lint": "standard && standard-markdown",
     "fix": "standard --fix && standard-markdown --fix",
-    "prepublishOnly": "cp docs/README.md README.md"
+    "prepublishOnly": "cp docs/README.md README.md",
+    "start": "node bot.js"
   },
   "repository": {
     "type": "git",
@@ -21,6 +22,7 @@
   },
   "license": "MIT",
   "dependencies": {
+    "canvas": "^3.2.3",
     "minecraft-data": "^3.108.0",
     "minecraft-protocol": "^1.66.0",
     "mojangson": "^2.0.4",
@@ -34,6 +36,7 @@
     "prismarine-physics": "^1.9.0",
     "prismarine-recipe": "^1.5.0",
     "prismarine-registry": "^1.10.0",
+    "prismarine-viewer": "^1.33.0",
     "prismarine-windows": "^2.9.0",
     "prismarine-world": "^3.6.0",
     "protodef": "^1.18.0",
