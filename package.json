@@ -11,7 +11,8 @@
     "lint": "standard && standard-markdown",
     "fix": "standard --fix && standard-markdown --fix",
     "prepublishOnly": "cp docs/README.md README.md",
-    "start": "node bot.js"
+    "start": "node bot.js",
+    "dev": "node --watch bot.js"
   },
   "repository": {
     "type": "git",

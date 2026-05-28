@@ -62,6 +62,18 @@ describe('holocraft bot config', function () {
     })
   })
 
+  it('disconnects the bot when the process receives a shutdown signal', () => {
+    const { attachShutdownHandlers } = require('../bot')
+    const bot = { quitCalls: 0, quit: () => { bot.quitCalls++ } }
+    const signals = ['bot-test-shutdown']
+
+    attachShutdownHandlers(bot, signals)
+    process.emit('bot-test-shutdown')
+    process.emit('bot-test-shutdown')
+
+    assert.strictEqual(bot.quitCalls, 1)
+  })
+
   it('starts prismarine-viewer with the bot and viewer options', () => {
     const { startViewer } = require('../bot')
     const calls = []
