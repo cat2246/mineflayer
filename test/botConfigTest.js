@@ -410,6 +410,88 @@ describe('holocraft bot config', function () {
     ])
   })
 
+  it('eats the best safe food when hunger is not full', async () => {
+    const { runAutoEat } = require('../bot')
+    const events = []
+    const bot = autoEatBot([
+      { name: 'apple' },
+      { name: 'bread' }
+    ], events)
+    bot.food = 18
+    bot.health = 20
+
+    const ate = await runAutoEat(bot, {
+      debugLog: () => {}
+    })
+
+    assert.strictEqual(ate, true)
+    assert.deepStrictEqual(events, [
+      ['setGoal', null],
+      ['control', 'sprint', false],
+      ['control', 'jump', false],
+      ['equip', 'bread', 'hand'],
+      ['consume']
+    ])
+  })
+
+  it('uses a golden apple for low health when hunger is full', async () => {
+    const { runAutoEat } = require('../bot')
+    const events = []
+    const bot = autoEatBot([
+      { name: 'bread' },
+      { name: 'golden_apple' }
+    ], events)
+    bot.food = 20
+    bot.health = 8
+
+    const ate = await runAutoEat(bot, {
+      debugLog: () => {}
+    })
+
+    assert.strictEqual(ate, true)
+    assert.deepStrictEqual(events, [
+      ['setGoal', null],
+      ['control', 'sprint', false],
+      ['control', 'jump', false],
+      ['equip', 'golden_apple', 'hand'],
+      ['consume']
+    ])
+  })
+
+  it('does not eat unsafe food when no safe food is available', async () => {
+    const { runAutoEat } = require('../bot')
+    const events = []
+    const entries = []
+    const bot = autoEatBot([
+      { name: 'rotten_flesh' }
+    ], events)
+    bot.food = 12
+    bot.health = 20
+
+    const ate = await runAutoEat(bot, {
+      debugLog: (event, data) => entries.push({ event, data })
+    })
+
+    assert.strictEqual(ate, false)
+    assert.deepStrictEqual(events, [])
+    assert(entries.some(entry => entry.event === 'autoeat.noFood'))
+  })
+
+  it('runs auto eat after health updates', async () => {
+    const { attachAutoEat } = require('../bot')
+    const bot = new EventEmitter()
+    const events = []
+
+    attachAutoEat(bot, {
+      runAutoEat: async autoEatBot => events.push(['autoEat', autoEatBot])
+    })
+
+    bot.emit('health')
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [['autoEat', bot]])
+  })
+
   it('lists wood cutting from the automation menu and starts the selected automation', async () => {
     const { createCommandConsole } = require('../bot')
     const output = []
@@ -584,6 +666,34 @@ describe('holocraft bot config', function () {
     ])
   })
 
+  it('does not keep cutting after wood cutting is stopped mid-task', async () => {
+    const { cutTreeLog } = require('../bot')
+    const events = []
+    let stopped = false
+    const treeLog = block('oak_log', 0, 64, 0)
+    const bot = blockBot([
+      treeLog,
+      block('oak_leaves', 1, 66, 0)
+    ], events)
+    bot.pathfinder = {
+      goto: async goal => {
+        events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+        stopped = true
+      }
+    }
+
+    const cut = await cutTreeLog(bot, treeLog, {
+      debugLog: () => {},
+      shouldStop: () => stopped,
+      sleep: async () => {}
+    })
+
+    assert.strictEqual(cut, false)
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalGetToBlock', 0, 64, 0]
+    ])
+  })
+
   it('normalizes non-array tool enchant data before digging a tree log', async () => {
     const { cutTreeLog } = require('../bot')
     const events = []
@@ -647,6 +757,242 @@ describe('holocraft bot config', function () {
       ['dig', 'oak_log']
     ])
     assert.strictEqual(bot.inventory.slots[45], null)
+  })
+
+  it('places a scaffold block when a tree log is too high to reach', async () => {
+    const { cutTreeLog } = require('../bot')
+    const events = []
+    let canReachLog = false
+    const treeLog = block('oak_log', 0, 72, 0)
+    const bot = blockBot([
+      treeLog,
+      block('oak_leaves', 1, 74, 0),
+      block('dirt', 0, 63, 0)
+    ], events)
+    bot.inventory.items = () => [{ name: 'dirt' }]
+    bot.canDigBlock = () => canReachLog
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+    }
+    bot.setControlState = (control, state) => events.push(['control', control, state])
+    bot.placeBlock = async (referenceBlock, faceVector) => {
+      events.push(['placeBlock', referenceBlock.name, faceVector.x, faceVector.y, faceVector.z])
+      canReachLog = true
+      bot.entity.position = combatPosition(0, 68, 0)
+    }
+
+    await cutTreeLog(bot, treeLog, {
+      debugLog: () => {},
+      sleep: async () => {}
+    })
+
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalNearXZ', 0, undefined, 0],
+      ['equip', 'dirt', 'hand'],
+      ['control', 'jump', true],
+      ['placeBlock', 'dirt', 0, 1, 0],
+      ['control', 'jump', false],
+      ['control', 'sprint', false],
+      ['control', 'jump', false],
+      ['dig', 'oak_log']
+    ])
+  })
+
+  it('does not dig a tree log outside normal player reach', async () => {
+    const { cutTreeLog } = require('../bot')
+    const events = []
+    const entries = []
+    const treeLog = block('oak_log', 0, 71, 0)
+    const bot = blockBot([
+      treeLog,
+      block('oak_leaves', 1, 73, 0)
+    ], events)
+    bot.canDigBlock = () => true
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+    }
+
+    const cut = await cutTreeLog(bot, treeLog, {
+      debugLog: (event, data) => entries.push({ event, data }),
+      maxScaffoldBlocks: 0,
+      sleep: async () => {}
+    })
+
+    assert.strictEqual(cut, false)
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalNearXZ', 0, undefined, 0]
+    ])
+    assert(entries.some(entry => entry.event === 'automation.woodcutting.unreachableLog'))
+  })
+
+  it('uses raycast digging so only visible block faces are hit', async () => {
+    const { cutTreeLog } = require('../bot')
+    const events = []
+    const treeLog = block('oak_log', 0, 64, 0)
+    const bot = blockBot([
+      treeLog,
+      block('oak_leaves', 1, 66, 0)
+    ], events)
+    bot.pathfinder = {
+      goto: async () => {}
+    }
+    bot.dig = async (target, forceLook, digFace) => {
+      events.push(['dig', target.name, forceLook, digFace])
+    }
+
+    await cutTreeLog(bot, treeLog, {
+      debugLog: () => {},
+      sleep: async () => {}
+    })
+
+    assert.deepStrictEqual(events, [
+      ['dig', 'oak_log', true, 'raycast']
+    ])
+  })
+
+  it('clears a reachable leaf blocker before retrying a hidden tree log', async () => {
+    const { cutTreeLog } = require('../bot')
+    const events = []
+    let leafCleared = false
+    const treeLog = block('oak_log', 0, 64, 0)
+    const leafBlocker = block('oak_leaves', 0, 65, 0)
+    const bot = blockBot([
+      treeLog,
+      leafBlocker
+    ], events)
+    bot.pathfinder = {
+      goto: async () => {}
+    }
+    bot.dig = async (target, forceLook, digFace) => {
+      if (target.name === 'oak_log' && !leafCleared) {
+        throw new Error('Block not in view')
+      }
+      events.push(['dig', target.name, forceLook, digFace])
+      if (target.name === 'oak_leaves') leafCleared = true
+    }
+
+    const cut = await cutTreeLog(bot, treeLog, {
+      debugLog: () => {},
+      sleep: async () => {}
+    })
+
+    assert.strictEqual(cut, true)
+    assert.deepStrictEqual(events, [
+      ['dig', 'oak_leaves', true, 'raycast'],
+      ['dig', 'oak_log', true, 'raycast']
+    ])
+  })
+
+  it('temporarily skips unreachable logs when no scaffold block is available', async () => {
+    const { runWoodCuttingCycle } = require('../bot')
+    const events = []
+    const entries = []
+    const treeLog = block('oak_log', 0, 72, 0)
+    const bot = blockBot([
+      treeLog,
+      block('oak_leaves', 1, 74, 0)
+    ], events)
+    bot.canDigBlock = () => false
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+    }
+
+    await runWoodCuttingCycle(bot, {
+      debugLog: (event, data) => entries.push({ event, data }),
+      now: () => 1000,
+      roamTarget: combatPosition(8, 64, 0),
+      sleep: async () => {}
+    })
+    await runWoodCuttingCycle(bot, {
+      debugLog: (event, data) => entries.push({ event, data }),
+      now: () => 1000,
+      roamTarget: combatPosition(8, 64, 0),
+      sleep: async () => {}
+    })
+
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalNearXZ', 0, undefined, 0],
+      ['goto', 'GoalNearXZ', 8, undefined, 0]
+    ])
+    assert(entries.some(entry => entry.event === 'automation.woodcutting.ignoreLog'))
+    assert(entries.some(entry => entry.event === 'automation.woodcutting.noTree'))
+  })
+
+  it('temporarily skips logs after repeated path timeout while cutting', async () => {
+    const { runWoodCuttingCycle } = require('../bot')
+    const events = []
+    const entries = []
+    let calls = 0
+    const treeLog = block('oak_log', 0, 72, 0)
+    const bot = blockBot([
+      treeLog,
+      block('oak_leaves', 1, 74, 0)
+    ], events)
+    bot.pathfinder = {
+      goto: async goal => {
+        calls++
+        events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+        if (calls === 1) return new Promise(() => {})
+      },
+      setGoal: goal => events.push(['setGoal', goal])
+    }
+
+    await runWoodCuttingCycle(bot, {
+      debugLog: (event, data) => entries.push({ event, data }),
+      now: () => 1000,
+      pathTimeoutMs: 1,
+      roamTarget: combatPosition(8, 64, 0),
+      sleep: async () => {}
+    })
+    await runWoodCuttingCycle(bot, {
+      debugLog: (event, data) => entries.push({ event, data }),
+      now: () => 1000,
+      pathTimeoutMs: 1,
+      roamTarget: combatPosition(8, 64, 0),
+      sleep: async () => {}
+    })
+
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalNearXZ', 0, undefined, 0],
+      ['setGoal', null],
+      ['goto', 'GoalNearXZ', 8, undefined, 0]
+    ])
+    assert(entries.some(entry =>
+      entry.event === 'automation.woodcutting.ignoreLog' &&
+      entry.data.reason === 'path-failed'
+    ))
+    assert(entries.some(entry => entry.event === 'automation.woodcutting.noTree'))
+  })
+
+  it('walks to nearby dropped items after cutting a tree log', async () => {
+    const { cutTreeLog } = require('../bot')
+    const events = []
+    const treeLog = block('oak_log', 0, 64, 0)
+    const bot = blockBot([
+      treeLog,
+      block('oak_leaves', 1, 66, 0)
+    ], events)
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+    }
+    bot.entities = {
+      1: {
+        type: 'object',
+        name: 'item',
+        position: combatPosition(1, 64, 0)
+      }
+    }
+
+    await cutTreeLog(bot, treeLog, {
+      debugLog: () => {},
+      sleep: async () => {}
+    })
+
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalGetToBlock', 0, 64, 0],
+      ['dig', 'oak_log'],
+      ['goto', 'GoalNear', 1, 64, 0]
+    ])
   })
 
   it('looks at the log and pauses before digging', async () => {
@@ -794,6 +1140,44 @@ describe('holocraft bot config', function () {
     automation.stop()
 
     assert.deepStrictEqual(events, [['setGoal', null]])
+  })
+
+  it('stops the active wood cutting task before it digs', async () => {
+    const { startWoodCuttingAutomation } = require('../bot')
+    const events = []
+    let releaseGoto
+    let notifyGotoStarted
+    const gotoStarted = new Promise(resolve => { notifyGotoStarted = resolve })
+    const gotoRelease = new Promise(resolve => { releaseGoto = resolve })
+    const treeLog = block('oak_log', 0, 64, 0)
+    const bot = blockBot([
+      treeLog,
+      block('oak_leaves', 1, 66, 0)
+    ], events)
+    bot.pathfinder = {
+      goto: async goal => {
+        events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+        notifyGotoStarted()
+        await gotoRelease
+      },
+      setGoal: goal => events.push(['setGoal', goal])
+    }
+
+    const automation = startWoodCuttingAutomation(bot, {
+      sleep: async () => {},
+      debugLog: () => {},
+      output: () => {}
+    })
+
+    await gotoStarted
+    automation.stop()
+    releaseGoto()
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalGetToBlock', 0, 64, 0],
+      ['setGoal', null]
+    ])
   })
 
   it('enables physics before starting wood cutting movement', async () => {
@@ -1136,6 +1520,31 @@ function combatTarget (name, x) {
     name,
     height: 1.8,
     position: combatPosition(x, 0, 0)
+  }
+}
+
+function autoEatBot (items = [], events = []) {
+  const foodsByName = {
+    apple: { foodPoints: 4, saturation: 2.4, effectiveQuality: 6.4 },
+    bread: { foodPoints: 5, saturation: 6, effectiveQuality: 11 },
+    golden_apple: { foodPoints: 4, saturation: 9.6, effectiveQuality: 13.6 },
+    rotten_flesh: { foodPoints: 4, saturation: 0.8, effectiveQuality: 4.8 }
+  }
+
+  return {
+    food: 20,
+    health: 20,
+    game: { gameMode: 'survival' },
+    registry: { foodsByName },
+    inventory: {
+      items: () => items
+    },
+    pathfinder: {
+      setGoal: goal => events.push(['setGoal', goal])
+    },
+    setControlState: (control, state) => events.push(['control', control, state]),
+    equip: async (item, destination) => events.push(['equip', item.name, destination]),
+    consume: async () => events.push(['consume'])
   }
 }
 

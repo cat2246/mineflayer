@@ -1,5 +1,6 @@
 module.exports = {
   ...require('./automations'),
+  ...require('./autoEat'),
   ...require('./combat'),
   ...require('./commandConsole'),
   ...require('./config'),
