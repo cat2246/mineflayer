@@ -17,6 +17,7 @@ function createCommandConsole (bot, options = {}) {
   const debugLog = options.debugLog || (() => {})
   const automationManager = options.automationManager || createAutomationManager(bot, { output, debugLog })
   const followController = options.followController || createFollowController(bot, { output, debugLog })
+  const knockbackController = options.knockbackController
   let pendingHomes = null
   let pendingAutomation = false
 
@@ -108,6 +109,17 @@ function createCommandConsole (bot, options = {}) {
       return
     }
 
+    if (command.toLowerCase() === '/knockback debug') {
+      if (!knockbackController?.toggleDebug) {
+        output('Knockback debug is not available.')
+        return
+      }
+      const result = knockbackController.toggleDebug()
+      output(result.message)
+      if (result.enabled) output(`Hit the bot once, then check ${path.relative(process.cwd(), DEBUG_LOG_PATH)}.`)
+      return
+    }
+
     if (command.toLowerCase() === '/help') {
       const helpLines = typeof followController.helpLines === 'function'
         ? followController.helpLines()
@@ -116,10 +128,12 @@ function createCommandConsole (bot, options = {}) {
             '/unfollow - stop following',
             '/pickup - toggle dropped item pickup',
             '/unload inventory - unload into a nearby chest',
+            '/knockback debug - toggle knockback diagnostics',
             '/help - show commands'
           ]
       output('Commands:')
       helpLines.forEach(line => output(line))
+      output('/knockback debug - toggle knockback diagnostics')
       return
     }
 

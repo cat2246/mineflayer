@@ -14,6 +14,32 @@ const MOVEMENT_CONTROLS = [
   'sneak'
 ]
 
+function vectorData (vector) {
+  if (!vector) return null
+  return {
+    x: vector.x,
+    y: vector.y,
+    z: vector.z
+  }
+}
+
+function entityData (entity) {
+  if (!entity) return null
+  return {
+    id: entity.id,
+    name: entity.name,
+    username: entity.username,
+    type: entity.type,
+    position: vectorData(entity.position),
+    velocity: vectorData(entity.velocity)
+  }
+}
+
+function controlStateData (bot) {
+  if (typeof bot.getControlState !== 'function') return {}
+  return Object.fromEntries(MOVEMENT_CONTROLS.map(control => [control, bot.getControlState(control)]))
+}
+
 function isMovementPaused (bot, now = Date.now()) {
   return Boolean(bot.__movementPausedUntil && bot.__movementPausedUntil > now)
 }
@@ -78,21 +104,84 @@ function applyFallbackKnockback (bot, source, options = {}) {
 }
 
 function attachKnockbackPause (bot, options = {}) {
+  const debugLog = options.debugLog || (() => {})
+  const now = options.now || (() => Date.now())
+  const debugSampleTicks = options.debugSampleTicks ?? 5
+  let debugEnabled = Boolean(options.debugEnabled)
+  let debugTicksRemaining = 0
+
+  function movementSnapshot () {
+    return {
+      time: now(),
+      self: entityData(bot.entity),
+      movementPausedUntil: bot.__movementPausedUntil || null,
+      movementPaused: isMovementPaused(bot, now()),
+      pvpTarget: entityData(bot.pvp?.target),
+      controlStates: controlStateData(bot)
+    }
+  }
+
+  function logDebug (event, data = {}) {
+    if (!debugEnabled) return
+    debugLog(event, {
+      ...data,
+      ...movementSnapshot()
+    })
+  }
+
   function onEntityHurt (entity, source) {
     if (!isBotEntity(bot, entity)) return
+    debugTicksRemaining = debugSampleTicks
+    logDebug('knockback.debug.hurt', {
+      entity: entityData(entity),
+      source: entityData(source)
+    })
     pauseMovementForKnockback(bot, options)
     if (applyFallbackKnockback(bot, source, options)) {
-      ;(options.debugLog || (() => {}))('knockback.fallbackVelocity', {
+      debugLog('knockback.fallbackVelocity', {
         velocity: bot.entity.velocity
       })
     }
   }
 
+  function onEntityVelocity (packet) {
+    if (!debugEnabled || packet.entityId !== bot.entity?.id) return
+    debugTicksRemaining = Math.max(debugTicksRemaining, debugSampleTicks)
+    logDebug('knockback.debug.selfVelocityPacket', { packet })
+  }
+
+  function onPhysicsTick () {
+    if (!debugEnabled || debugTicksRemaining <= 0) return
+    logDebug('knockback.debug.physicsTick')
+    debugTicksRemaining--
+  }
+
+  function setDebugEnabled (enabled) {
+    debugEnabled = Boolean(enabled)
+    debugLog('knockback.debug.toggle', { enabled: debugEnabled })
+    return {
+      enabled: debugEnabled,
+      message: `Knockback debug ${debugEnabled ? 'enabled' : 'disabled'}.`
+    }
+  }
+
+  function toggleDebug () {
+    return setDebugEnabled(!debugEnabled)
+  }
+
   bot.on('entityHurt', onEntityHurt)
+  bot.on('physicsTick', onPhysicsTick)
+  bot._client?.on?.('entity_velocity', onEntityVelocity)
 
   return {
     pause: () => pauseMovementForKnockback(bot, options),
-    stop: () => bot.off?.('entityHurt', onEntityHurt)
+    setDebugEnabled,
+    stop: () => {
+      bot.off?.('entityHurt', onEntityHurt)
+      bot.off?.('physicsTick', onPhysicsTick)
+      bot._client?.off?.('entity_velocity', onEntityVelocity)
+    },
+    toggleDebug
   }
 }
 

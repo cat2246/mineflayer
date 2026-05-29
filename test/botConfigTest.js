@@ -522,6 +522,42 @@ describe('holocraft bot config', function () {
     assert.strictEqual(bot.entity.velocity.z, 0)
   })
 
+  it('logs knockback diagnostics when debug is enabled', () => {
+    const { attachKnockbackPause } = require('../bot')
+    const entries = []
+    const bot = new EventEmitter()
+    bot._client = new EventEmitter()
+    bot.entity = {
+      id: 1,
+      position: combatPosition(0, 64, 0),
+      velocity: { x: 0, y: 0, z: 0 }
+    }
+    bot.getControlState = control => control === 'forward'
+    bot.pathfinder = { setGoal: () => {} }
+    const source = {
+      id: 2,
+      name: 'zombie',
+      position: combatPosition(1, 64, 0)
+    }
+    const controller = attachKnockbackPause(bot, {
+      now: () => 1000,
+      debugLog: (event, data) => entries.push({ event, data }),
+      debugSampleTicks: 2
+    })
+
+    controller.setDebugEnabled(true)
+    bot.emit('entityHurt', bot.entity, source)
+    bot._client.emit('entity_velocity', {
+      entityId: 1,
+      velocity: { x: 1000, y: 2000, z: 3000 }
+    })
+    bot.emit('physicsTick')
+
+    assert(entries.some(entry => entry.event === 'knockback.debug.hurt' && entry.data.source.name === 'zombie'))
+    assert(entries.some(entry => entry.event === 'knockback.debug.selfVelocityPacket' && entry.data.packet.entityId === 1))
+    assert(entries.some(entry => entry.event === 'knockback.debug.physicsTick' && entry.data.controlStates.forward === true))
+  })
+
   it('does not run combat while night safety is active', async () => {
     const { runCombatTick } = require('../bot')
     const events = []
@@ -891,6 +927,27 @@ describe('holocraft bot config', function () {
 
     assert.deepStrictEqual(events, [['togglePickup']])
     assert(output.some(message => message.includes('Dropped item pickup enabled.')))
+  })
+
+  it('toggles knockback debug logging from the terminal', async () => {
+    const { createCommandConsole } = require('../bot')
+    const output = []
+    const events = []
+    const bot = new EventEmitter()
+    const consoleController = createCommandConsole(bot, {
+      output: message => output.push(message),
+      knockbackController: {
+        toggleDebug: () => {
+          events.push(['toggleKnockbackDebug'])
+          return { enabled: true, message: 'Knockback debug enabled.' }
+        }
+      }
+    })
+
+    await consoleController.handleLine('/knockback debug')
+
+    assert.deepStrictEqual(events, [['toggleKnockbackDebug']])
+    assert(output.some(message => message.includes('Knockback debug enabled.')))
   })
 
   it('refuses to follow players not in the server', async () => {
