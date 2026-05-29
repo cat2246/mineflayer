@@ -1,13 +1,16 @@
 const mineflayer = require('mineflayer')
 const { pathfinder, Movements } = require('mineflayer-pathfinder')
+const pvp = require('mineflayer-pvp').plugin
 const { attachAiChat } = require('./aiChat')
 const { attachAutoEat } = require('./autoEat')
 const { buildBotOptions } = require('./config')
 const { attachCombat } = require('./combat')
 const { startConsole } = require('./commandConsole')
+const { createAutomationManager } = require('./automations')
 const { createDebugLogger } = require('./debugLogger')
 const { attachDeathRecovery } = require('./deathRecovery')
 const { attachEventLogging } = require('./eventLogging')
+const { attachNightSafety } = require('./nightSafety')
 const { closeViewer } = require('./viewer')
 
 function configureConservativeMovements (movements) {
@@ -15,8 +18,23 @@ function configureConservativeMovements (movements) {
   movements.allowSprinting = false
   movements.allowParkour = false
   movements.allow1by1towers = false
+  movements.canOpenDoors = false
   movements.maxDropDown = 2
   return movements
+}
+
+function loadPvpPlugin (bot, plugin = pvp) {
+  const originalOn = bot.on
+  bot.on = function onWithoutDeprecatedPhysicsEvent (eventName, ...args) {
+    const safeEventName = eventName === 'physicTick' ? 'physicsTick' : eventName
+    return originalOn.call(this, safeEventName, ...args)
+  }
+
+  try {
+    bot.loadPlugin(plugin)
+  } finally {
+    bot.on = originalOn
+  }
 }
 
 function attachShutdownHandlers (bot, signals = ['SIGINT', 'SIGTERM']) {
@@ -44,6 +62,7 @@ function createBot (options = buildBotOptions()) {
   })
   const rawBot = mineflayer.createBot(options)
   rawBot.loadPlugin(pathfinder)
+  loadPvpPlugin(rawBot)
   const bot = attachEventLogging(rawBot, { debugLog })
   bot.once('spawn', () => {
     const movements = configureConservativeMovements(new Movements(bot))
@@ -51,7 +70,9 @@ function createBot (options = buildBotOptions()) {
   })
   attachDeathRecovery(bot, { debugLog })
   attachAutoEat(bot, { debugLog })
-  startConsole(bot, { debugLog })
+  const automationManager = createAutomationManager(bot, { debugLog })
+  startConsole(bot, { debugLog, automationManager })
+  attachNightSafety(bot, { debugLog, automationManager })
   attachCombat(bot, { debugLog })
   attachAiChat(bot, { debugLog })
   attachShutdownHandlers(bot)
@@ -73,5 +94,6 @@ module.exports = {
   attachShutdownHandlers,
   configureConservativeMovements,
   createBot,
+  loadPvpPlugin,
   start
 }

@@ -64,7 +64,7 @@ const RANGED_HOSTILE_MOB_NAMES = new Set([
 function isHostileMob (entity) {
   return Boolean(
     entity &&
-    entity.type === 'mob' &&
+    (entity.type === 'mob' || entity.type === 'hostile') &&
     HOSTILE_MOB_NAMES.has(String(entity.name || '').toLowerCase())
   )
 }
@@ -159,9 +159,9 @@ function stopPathfinder (bot) {
   }
 }
 
-function markCombatBusy (bot) {
+function markCombatBusy (bot, options = {}) {
   bot.__combatActiveUntil = Date.now() + COMBAT_BUSY_MS
-  stopPathfinder(bot)
+  if (options.stopPathfinder !== false) stopPathfinder(bot)
 }
 
 async function performSwordAttack (bot, action, debugLog) {
@@ -210,12 +210,47 @@ async function fleeFromTarget (bot, action, options, debugLog) {
   })
 }
 
+async function performPvpAttack (bot, target, debugLog) {
+  markCombatBusy(bot, { stopPathfinder: false })
+  const sword = findSword(bot)
+  if (sword) await bot.equip(sword, 'hand')
+
+  if (bot.pvp.target !== target) {
+    bot.pvp.attack(target)
+  }
+
+  debugLog('combat.attack', {
+    mode: 'pvp',
+    target: target.name,
+    distance: distanceToEntity(bot, target)
+  })
+
+  return {
+    type: 'pvp',
+    target,
+    weapon: sword || null,
+    distance: distanceToEntity(bot, target)
+  }
+}
+
 async function runCombatTick (bot, options = {}) {
-  if (bot._ended || bot.currentWindow) return { type: 'none' }
+  if (bot._ended || bot.currentWindow || bot.__nightSafetyActive || bot.isSleeping) return { type: 'none' }
 
   const debugLog = options.debugLog || (() => {})
   const targetFinder = options.targetFinder || findNearestHostileMob
   const target = targetFinder(bot, options.targetRange ?? COMBAT_TARGET_RANGE)
+
+  if (!target) {
+    if (bot.pvp?.target && typeof bot.pvp.stop === 'function') {
+      await bot.pvp.stop()
+    }
+    return { type: 'none' }
+  }
+
+  if (typeof bot.pvp?.attack === 'function') {
+    return performPvpAttack(bot, target, debugLog)
+  }
+
   const action = chooseCombatAction(bot, target, options)
 
   if (action.type === 'sword') await performSwordAttack(bot, action, debugLog)

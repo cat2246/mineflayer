@@ -93,6 +93,7 @@ describe('holocraft bot config', function () {
     assert.strictEqual(movements.allowSprinting, false)
     assert.strictEqual(movements.allowParkour, false)
     assert.strictEqual(movements.allow1by1towers, false)
+    assert.strictEqual(movements.canOpenDoors, false)
     assert.strictEqual(movements.maxDropDown, 2)
   })
 
@@ -228,6 +229,46 @@ describe('holocraft bot config', function () {
     assert.deepStrictEqual(events, ['startViewer', 'loginToServer', 'joinSurvivalWorld'])
   })
 
+  it('loads the pvp plugin with the non-deprecated physicsTick event', () => {
+    const { loadPvpPlugin } = require('../bot')
+    const events = []
+    const bot = {
+      loadPlugin: plugin => plugin(bot),
+      on: eventName => events.push(['on', eventName])
+    }
+
+    loadPvpPlugin(bot, pluginBot => {
+      pluginBot.on('physicTick', () => {})
+    })
+
+    assert.deepStrictEqual(events, [
+      ['on', 'physicsTick']
+    ])
+  })
+
+  it('re-enables physics after joining Survival on the first spawn', async () => {
+    const { attachEventLogging } = require('../bot')
+    const bot = new EventEmitter()
+    const sleeps = []
+    const events = []
+    bot.physicsEnabled = false
+    bot.on('physicsEnabled', data => events.push(['physicsEnabled', data.spawnCount]))
+
+    attachEventLogging(bot, {
+      loginToServer: async () => {},
+      joinSurvivalWorld: async () => {},
+      sleep: async (ms) => sleeps.push(ms),
+      startViewer: () => {}
+    })
+
+    bot.emit('spawn')
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(sleeps, [10000])
+    assert.strictEqual(bot.physicsEnabled, true)
+    assert.deepStrictEqual(events, [['physicsEnabled', 1]])
+  })
+
   it('keeps physics disabled on the lobby spawn', async () => {
     const { attachEventLogging } = require('../bot')
     const bot = new EventEmitter()
@@ -301,6 +342,7 @@ describe('holocraft bot config', function () {
     const { isHostileMob } = require('../bot')
 
     assert.strictEqual(isHostileMob({ type: 'mob', name: 'zombie' }), true)
+    assert.strictEqual(isHostileMob({ type: 'hostile', name: 'zombie' }), true)
     assert.strictEqual(isHostileMob({ type: 'mob', name: 'cow' }), false)
     assert.strictEqual(isHostileMob({ type: 'player', name: 'Steve' }), false)
   })
@@ -368,6 +410,45 @@ describe('holocraft bot config', function () {
       ['lookAt'],
       ['attack', 'zombie']
     ])
+  })
+
+  it('delegates hostile targets to mineflayer-pvp when available', async () => {
+    const { runCombatTick } = require('../bot')
+    const events = []
+    const target = combatTarget('zombie', 7)
+    const bot = combatBot([{ name: 'diamond_sword' }], events)
+    bot.pvp = {
+      target: null,
+      attack: entity => events.push(['pvpAttack', entity.name])
+    }
+
+    const action = await runCombatTick(bot, {
+      targetFinder: () => target,
+      debugLog: () => {}
+    })
+
+    assert.strictEqual(action.type, 'pvp')
+    assert(bot.__combatActiveUntil >= Date.now())
+    assert.deepStrictEqual(events, [
+      ['equip', 'diamond_sword', 'hand'],
+      ['pvpAttack', 'zombie']
+    ])
+  })
+
+  it('does not run combat while night safety is active', async () => {
+    const { runCombatTick } = require('../bot')
+    const events = []
+    const target = combatTarget('zombie', 3)
+    const bot = combatBot([{ name: 'diamond_sword' }], events)
+    bot.__nightSafetyActive = true
+
+    const action = await runCombatTick(bot, {
+      targetFinder: () => target,
+      debugLog: () => {}
+    })
+
+    assert.strictEqual(action.type, 'none')
+    assert.deepStrictEqual(events, [])
   })
 
   it('performs bow combat against a far hostile mob', async () => {
@@ -514,6 +595,38 @@ describe('holocraft bot config', function () {
 
     assert(output.some(message => message.includes('1. Wood cutting')))
     assert.deepStrictEqual(events, [['startAutomation', 0]])
+  })
+
+  it('lists farming and wild roaming in the default automation menu', async () => {
+    const { createAutomationManager } = require('../bot')
+    const events = []
+    const bot = new EventEmitter()
+    const automationManager = createAutomationManager(bot, {
+      output: () => {},
+      debugLog: () => {},
+      startWoodCuttingAutomation: () => ({
+        stop: () => events.push(['stop', 'wood'])
+      }),
+      startFarmingAutomation: () => ({
+        stop: () => events.push(['stop', 'farming'])
+      }),
+      startWildRoamingAutomation: () => ({
+        stop: () => events.push(['stop', 'wild'])
+      })
+    })
+
+    assert.deepStrictEqual(automationManager.list(), [
+      { name: 'Wood cutting' },
+      { name: 'Farming' },
+      { name: 'Wild roaming' }
+    ])
+
+    await automationManager.startByIndex(1)
+    await automationManager.startByIndex(2)
+
+    assert.deepStrictEqual(events, [
+      ['stop', 'farming']
+    ])
   })
 
   it('stops the active automation from the terminal', async () => {
@@ -802,6 +915,29 @@ describe('holocraft bot config', function () {
     bot.emit('chat', 'PokiMoki82719', 'PokiMoki82719 status')
     await new Promise(resolve => setImmediate(resolve))
 
+    assert.deepStrictEqual(events, [])
+  })
+
+  it('ignores server join announcements that mention the bot username', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    let codexCalls = 0
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => events.push(['chat', message])
+    bot.whisper = (username, message) => events.push(['whisper', username, message])
+
+    attachAiChat(bot, {
+      runCodex: async () => {
+        codexCalls++
+        return 'Hi Joined!'
+      }
+    })
+
+    bot.emit('chat', 'Joined', 'PokiMoki82719')
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.strictEqual(codexCalls, 0)
     assert.deepStrictEqual(events, [])
   })
 
@@ -1189,6 +1325,49 @@ describe('holocraft bot config', function () {
     assert(entries.some(entry => entry.event === 'automation.woodcutting.noTree'))
   })
 
+  it('temporarily skips the rest of a failed trunk column', async () => {
+    const { runWoodCuttingCycle } = require('../bot')
+    const events = []
+    const entries = []
+    let calls = 0
+    const lowerLog = block('oak_log', 0, 64, 0)
+    const upperLog = block('oak_log', 0, 65, 0)
+    const bot = blockBot([
+      lowerLog,
+      upperLog,
+      block('oak_leaves', 1, 66, 0)
+    ], events)
+    bot.pathfinder = {
+      goto: async goal => {
+        calls++
+        events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+        if (calls === 1) throw new Error('No path to the goal!')
+      },
+      setGoal: goal => events.push(['setGoal', goal])
+    }
+
+    await runWoodCuttingCycle(bot, {
+      debugLog: (event, data) => entries.push({ event, data }),
+      now: () => 1000,
+      roamTarget: combatPosition(8, 64, 0),
+      sleep: async () => {}
+    })
+    await runWoodCuttingCycle(bot, {
+      debugLog: (event, data) => entries.push({ event, data }),
+      now: () => 1000,
+      roamTarget: combatPosition(8, 64, 0),
+      sleep: async () => {}
+    })
+
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalGetToBlock', 0, 64, 0],
+      ['setGoal', null],
+      ['goto', 'GoalNearXZ', 8, undefined, 0]
+    ])
+    assert.strictEqual(entries.filter(entry => entry.event === 'automation.woodcutting.ignoreLog').length, 1)
+    assert(entries.some(entry => entry.event === 'automation.woodcutting.noTree'))
+  })
+
   it('walks to nearby dropped items after cutting a tree log', async () => {
     const { cutTreeLog } = require('../bot')
     const events = []
@@ -1239,14 +1418,16 @@ describe('holocraft bot config', function () {
       sleep: async ms => events.push(['sleep', ms])
     })
 
-    assert.deepStrictEqual(events, [
+    assert.deepStrictEqual(events.slice(0, -1), [
       ['control', 'sprint', false],
       ['control', 'jump', false],
       ['lookAt', 0.5, 64.5, 0.5, true],
       ['sleep', 750],
-      ['dig', 'oak_log'],
-      ['sleep', 1500]
+      ['dig', 'oak_log']
     ])
+    assert.strictEqual(events[events.length - 1][0], 'sleep')
+    assert(events[events.length - 1][1] >= 1000)
+    assert(events[events.length - 1][1] <= 1600)
   })
 
   it('sanitizes component enchant data during wood cutting dig time', async () => {
@@ -1447,6 +1628,1004 @@ describe('holocraft bot config', function () {
       ['deposit', 17, 12],
       ['close']
     ])
+  })
+
+  it('returns home at night, opens the house door, cooks food, stores loot, and sleeps', async () => {
+    const { runNightSafetyCycle } = require('../bot')
+    const events = []
+    const door = block('oak_door', 1, 64, 0)
+    const furnaceBlock = block('furnace', 2, 64, 0)
+    const chestBlock = block('chest', 3, 64, 0)
+    const bedBlock = block('red_bed', 4, 64, 0)
+    const rawBeef = { name: 'beef', type: 363, count: 2 }
+    const coal = { name: 'coal', type: 263, count: 4 }
+    const oakLog = { name: 'oak_log', type: 17, count: 12 }
+    const sword = { name: 'iron_sword', type: 267, count: 1 }
+    const axe = { name: 'iron_axe', type: 258, count: 1 }
+    const pickaxe = { name: 'iron_pickaxe', type: 257, count: 1 }
+    const bread = { name: 'bread', type: 297, count: 3 }
+    const furnace = {
+      outputItem: () => null,
+      inputItem: () => null,
+      fuelItem: () => null,
+      putFuel: async (type, metadata, count) => events.push(['putFuel', type, count]),
+      putInput: async (type, metadata, count) => events.push(['putInput', type, count]),
+      close: () => events.push(['furnaceClose'])
+    }
+    const chest = {
+      deposit: async (type, metadata, count) => events.push(['deposit', type, count]),
+      close: () => events.push(['chestClose'])
+    }
+    const bot = blockBot([door, furnaceBlock, chestBlock, bedBlock], events)
+    bot.time = { isDay: false, timeOfDay: 14000 }
+    bot.inventory.items = () => [rawBeef, coal, oakLog, sword, axe, pickaxe, bread]
+    bot.chat = command => events.push(['chat', command])
+    bot.activateBlock = async target => events.push(['activateBlock', target.name])
+    bot.openFurnace = async () => furnace
+    bot.openContainer = async () => chest
+    bot.sleep = async target => events.push(['sleepBed', target.name])
+
+    await runNightSafetyCycle(bot, {
+      sleep: async () => {},
+      debugLog: () => {}
+    })
+
+    assert.deepStrictEqual(events, [
+      ['chat', '/home home'],
+      ['activateBlock', 'oak_door'],
+      ['putFuel', 263, 1],
+      ['putInput', 363, 2],
+      ['furnaceClose'],
+      ['deposit', 17, 12],
+      ['chestClose'],
+      ['sleepBed', 'red_bed']
+    ])
+  })
+
+  it('moves through the opened home door without chasing a distant house block', async () => {
+    const { openNearbyDoor } = require('../bot')
+    const events = []
+    const door = block('oak_door', 0, 64, 0)
+    const basementChest = block('chest', 0, 60, 1)
+    const bot = blockBot([door, basementChest], events)
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.x, goal.y, goal.z])
+    }
+    bot.activateBlock = async target => events.push(['activateBlock', target.name])
+    bot.lookAt = async point => events.push(['lookAt', point.x, point.y, point.z])
+    bot.setControlState = (control, state) => events.push(['control', control, state])
+
+    await openNearbyDoor(bot, {
+      originPosition: combatPosition(0, 64, -2),
+      sleep: async ms => events.push(['sleep', ms]),
+      debugLog: () => {}
+    })
+
+    assert.deepStrictEqual(events, [
+      ['goto', 0, 64, 0],
+      ['activateBlock', 'oak_door'],
+      ['sleep', 300],
+      ['lookAt', 0.5, 65.6, 1.5],
+      ['control', 'forward', true],
+      ['sleep', 1200],
+      ['control', 'forward', false]
+    ])
+  })
+
+  it('continues opening a door when pathfinder cannot path to the closed door block', async () => {
+    const { openNearbyDoor } = require('../bot')
+    const events = []
+    const debugEntries = []
+    const door = block('oak_door', 0, 64, 0)
+    const bot = blockBot([door], events)
+    bot.pathfinder = {
+      goto: async goal => {
+        events.push(['goto', goal.x, goal.y, goal.z])
+        throw new Error('No path to the goal!')
+      }
+    }
+    bot.activateBlock = async target => events.push(['activateBlock', target.name])
+    bot.lookAt = async point => events.push(['lookAt', point.x, point.y, point.z])
+    bot.setControlState = (control, state) => events.push(['control', control, state])
+
+    const opened = await openNearbyDoor(bot, {
+      originPosition: combatPosition(0, 64, -2),
+      sleep: async ms => events.push(['sleep', ms]),
+      debugLog: (event, data) => debugEntries.push({ event, data })
+    })
+
+    assert.strictEqual(opened, true)
+    assert.deepStrictEqual(events, [
+      ['goto', 0, 64, 0],
+      ['activateBlock', 'oak_door'],
+      ['sleep', 300],
+      ['lookAt', 0.5, 65.6, 1.5],
+      ['control', 'forward', true],
+      ['sleep', 1200],
+      ['control', 'forward', false]
+    ])
+    assert(!debugEntries.some(entry => entry.event === 'nightSafety.pathError'))
+    assert(debugEntries.some(entry => entry.event === 'nightSafety.door.approachFailed'))
+  })
+
+  it('moves through an already open home door without activating it again', async () => {
+    const { openNearbyDoor } = require('../bot')
+    const events = []
+    const door = {
+      ...block('oak_door', 0, 64, 0),
+      _properties: { open: true }
+    }
+    const bot = blockBot([door], events)
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.x, goal.y, goal.z])
+    }
+    bot.activateBlock = async target => events.push(['activateBlock', target.name])
+    bot.lookAt = async point => events.push(['lookAt', point.x, point.y, point.z])
+    bot.setControlState = (control, state) => events.push(['control', control, state])
+
+    await openNearbyDoor(bot, {
+      originPosition: combatPosition(0, 64, -2),
+      sleep: async ms => events.push(['sleep', ms]),
+      debugLog: () => {}
+    })
+
+    assert.deepStrictEqual(events, [
+      ['goto', 0, 64, 0],
+      ['lookAt', 0.5, 65.6, 1.5],
+      ['control', 'forward', true],
+      ['sleep', 1200],
+      ['control', 'forward', false]
+    ])
+  })
+
+  it('leaves a second-floor house through a nearby door before daytime work', async () => {
+    const { leaveHomeForDaytime } = require('../bot')
+    const events = []
+    const door = block('oak_door', 0, 64, 0)
+    const bot = blockBot([door], events)
+    bot.entity.position = combatPosition(0, 68, 2)
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.x, goal.y, goal.z])
+    }
+    bot.activateBlock = async target => events.push(['activateBlock', target.name])
+    bot.lookAt = async point => events.push(['lookAt', point.x, point.y, point.z])
+    bot.setControlState = (control, state) => events.push(['control', control, state])
+
+    const leftHome = await leaveHomeForDaytime(bot, {
+      sleep: async ms => events.push(['sleep', ms]),
+      debugLog: () => {}
+    })
+
+    assert.strictEqual(leftHome, true)
+    assert.deepStrictEqual(events, [
+      ['goto', 0, 64, 0],
+      ['activateBlock', 'oak_door'],
+      ['sleep', 300],
+      ['lookAt', 0.5, 65.6, -0.5],
+      ['control', 'forward', true],
+      ['sleep', 1200],
+      ['control', 'forward', false]
+    ])
+  })
+
+  it('reports the night safety cycle as incomplete when it cannot sleep', async () => {
+    const { runNightSafetyCycle } = require('../bot')
+    const events = []
+    const bot = blockBot([], events)
+    bot.time = { isDay: false, timeOfDay: 14000 }
+    bot.chat = command => events.push(['chat', command])
+    bot.sleep = async () => events.push(['sleep'])
+
+    const completed = await runNightSafetyCycle(bot, {
+      sleep: async () => {},
+      debugLog: () => {}
+    })
+
+    assert.strictEqual(completed, false)
+    assert.deepStrictEqual(events, [
+      ['chat', '/home home']
+    ])
+  })
+
+  it('falls back to direct bed activation when Mineflayer thinks it is not night', async () => {
+    const { sleepInNearbyBed } = require('../bot')
+    const events = []
+    const bedBlock = block('white_bed', 1, 64, 0)
+    const bot = new EventEmitter()
+    Object.assign(bot, blockBot([bedBlock], events))
+    bot.time = { isDay: false, timeOfDay: 14000 }
+    bot.isRaining = false
+    bot.thunderState = 0
+    bot.sleep = async () => {
+      throw new Error("it's not night and it's not a thunderstorm")
+    }
+    bot.activateBlock = async target => {
+      events.push(['activateBlock', target.name])
+      process.nextTick(() => bot.emit('sleep'))
+    }
+
+    const slept = await sleepInNearbyBed(bot, {
+      sleep: async () => {},
+      debugLog: (event, data) => events.push(['debug', event, data?.timeOfDay])
+    })
+
+    assert.strictEqual(slept, true)
+    assert.deepStrictEqual(events, [
+      ['debug', 'nightSafety.sleep.failed', 14000],
+      ['activateBlock', 'white_bed'],
+      ['debug', 'nightSafety.sleep.fallbackActivated', 14000]
+    ])
+  })
+
+  it('does not activate the bed when wrapped time is daytime', async () => {
+    const { isDayTime, isNightTime, sleepInNearbyBed } = require('../bot')
+    const events = []
+    const bedBlock = block('white_bed', 1, 64, 0)
+    const bot = new EventEmitter()
+    Object.assign(bot, blockBot([bedBlock], events))
+    bot.time = { isDay: false, timeOfDay: -20656 }
+    bot.isRaining = false
+    bot.thunderState = 0
+    bot.sleep = async () => {
+      throw new Error("it's not night and it's not a thunderstorm")
+    }
+    bot.activateBlock = async target => events.push(['activateBlock', target.name])
+
+    const slept = await sleepInNearbyBed(bot, {
+      sleep: async () => {},
+      debugLog: (event, data) => events.push(['debug', event, data?.normalizedTimeOfDay])
+    })
+
+    assert.strictEqual(isDayTime(bot), true)
+    assert.strictEqual(isNightTime(bot), false)
+    assert.strictEqual(slept, false)
+    assert.deepStrictEqual(events, [
+      ['debug', 'nightSafety.sleep.failed', 3344],
+      ['debug', 'nightSafety.sleep.skippedDaytimeFallback', 3344]
+    ])
+  })
+
+  it('runs daytime gear instead of night safety when time wraps negative into daytime', async () => {
+    const { attachNightSafety } = require('../bot')
+    const bot = new EventEmitter()
+    const events = []
+    bot.physicsEnabled = false
+    bot.time = { isDay: false, timeOfDay: -20656 }
+    bot.entity = { position: combatPosition(0, 64, 0) }
+
+    const controller = attachNightSafety(bot, {
+      checkIntervalMs: 0,
+      debugLog: () => {},
+      runNightSafetyCycle: async () => events.push(['night']),
+      runDayGearCycle: async () => events.push(['gear']),
+      runDaytimeAutomationSequence: async () => events.push(['daytime'])
+    })
+
+    await new Promise(resolve => setImmediate(resolve))
+    bot.physicsEnabled = true
+    await controller.check()
+
+    assert.deepStrictEqual(events, [
+      ['gear']
+    ])
+  })
+
+  it('runs daytime tasks when wrapped negative time is daytime', async () => {
+    const { runDaytimeAutomationSequence } = require('../bot')
+    const events = []
+    const bot = blockBot([], events)
+    bot.time = { isDay: false, timeOfDay: -20656 }
+
+    await runDaytimeAutomationSequence(bot, {
+      debugLog: () => {},
+      originPosition: combatPosition(0, 64, 0),
+      tasks: [
+        { name: 'farming', run: async () => events.push(['task', 'farming']) }
+      ]
+    })
+
+    assert.deepStrictEqual(events, [
+      ['task', 'farming']
+    ])
+  })
+
+  it('does not open storage repeatedly when no bed is available at home', async () => {
+    const { runNightSafetyCycle } = require('../bot')
+    const events = []
+    const chestBlock = block('chest', 1, 64, 0)
+    const bot = blockBot([chestBlock], events)
+    bot.time = { isDay: false, timeOfDay: 14000 }
+    bot.chat = command => events.push(['chat', command])
+    bot.openContainer = async () => {
+      events.push(['openContainer'])
+      return {
+        deposit: async () => {},
+        close: () => events.push(['close'])
+      }
+    }
+    bot.sleep = async () => events.push(['sleep'])
+
+    const completed = await runNightSafetyCycle(bot, {
+      sleep: async () => {},
+      debugLog: () => {}
+    })
+
+    assert.strictEqual(completed, false)
+    assert.deepStrictEqual(events, [
+      ['chat', '/home home']
+    ])
+  })
+
+  it('uses the home teleport position when choosing a loot chest', async () => {
+    const { depositLoot } = require('../bot')
+    const events = []
+    const homeChest = block('chest', 1, 64, 0)
+    const otherChest = block('chest', 50, 64, 0)
+    const oakLog = { name: 'oak_log', type: 17, count: 12 }
+    const bot = blockBot([homeChest, otherChest], events)
+    bot.entity.position = combatPosition(49, 64, 0)
+    bot.inventory.items = () => [oakLog]
+    bot.openContainer = async target => ({
+      deposit: async (type, metadata, count) => events.push(['deposit', target.position.x, type, count]),
+      close: () => events.push(['close', target.position.x])
+    })
+
+    await depositLoot(bot, {
+      originPosition: combatPosition(0, 64, 0),
+      debugLog: () => {}
+    })
+
+    assert.deepStrictEqual(events, [
+      ['deposit', 1, 17, 12],
+      ['close', 1]
+    ])
+  })
+
+  it('harvests mature crops near home and replants them', async () => {
+    const { runFarmingTask } = require('../bot')
+    const events = []
+    const wheat = {
+      ...block('wheat', 1, 64, 0),
+      _properties: { age: 7 }
+    }
+    const farmland = block('farmland', 1, 63, 0)
+    const wheatSeeds = { name: 'wheat_seeds', type: 295, count: 4 }
+    const bot = blockBot([wheat, farmland], events)
+    bot.inventory.items = () => [wheatSeeds]
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.x, goal.y, goal.z])
+    }
+    bot.placeBlock = async (reference, faceVector) => events.push(['placeBlock', reference.name, faceVector.x, faceVector.y, faceVector.z])
+
+    const harvested = await runFarmingTask(bot, {
+      originPosition: combatPosition(0, 64, 0),
+      debugLog: () => {}
+    })
+
+    assert.strictEqual(harvested, 1)
+    assert.deepStrictEqual(events, [
+      ['goto', 1, 64, 0],
+      ['dig', 'wheat'],
+      ['equip', 'wheat_seeds', 'hand'],
+      ['placeBlock', 'farmland', 0, 1, 0]
+    ])
+  })
+
+  it('waits for combat to clear before farming crops', async () => {
+    const { runFarmingTask } = require('../bot')
+    const events = []
+    const entries = []
+    const wheat = {
+      ...block('wheat', 1, 64, 0),
+      _properties: { age: 7 }
+    }
+    const farmland = block('farmland', 1, 63, 0)
+    const wheatSeeds = { name: 'wheat_seeds', type: 295, count: 4 }
+    const bot = blockBot([wheat, farmland], events)
+    let now = 0
+    bot.__combatActiveUntil = 100
+    bot.inventory.items = () => [wheatSeeds]
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.x, goal.y, goal.z])
+    }
+    bot.placeBlock = async (reference, faceVector) => events.push(['placeBlock', reference.name, faceVector.x, faceVector.y, faceVector.z])
+
+    const harvested = await runFarmingTask(bot, {
+      originPosition: combatPosition(0, 64, 0),
+      now: () => now,
+      sleep: async ms => {
+        events.push(['sleep', ms])
+        now += ms
+      },
+      debugLog: (event, data) => entries.push({ event, data })
+    })
+
+    assert.strictEqual(harvested, 1)
+    assert.deepStrictEqual(events, [
+      ['sleep', 100],
+      ['goto', 1, 64, 0],
+      ['dig', 'wheat'],
+      ['equip', 'wheat_seeds', 'hand'],
+      ['placeBlock', 'farmland', 0, 1, 0]
+    ])
+    assert(entries.some(entry => entry.event === 'automation.farming.pausedForCombat'))
+  })
+
+  it('opens a nearby door and retries when farming starts behind a closed door', async () => {
+    const { runFarmingTask } = require('../bot')
+    const events = []
+    const entries = []
+    const wheat = {
+      ...block('wheat', 1, 64, 0),
+      _properties: { age: 7 }
+    }
+    const farmland = block('farmland', 1, 63, 0)
+    const wheatSeeds = { name: 'wheat_seeds', type: 295, count: 4 }
+    const bot = blockBot([wheat, farmland], events)
+    let pathAttempts = 0
+    bot.inventory.items = () => [wheatSeeds]
+    bot.pathfinder = {
+      goto: async goal => {
+        pathAttempts++
+        events.push(['goto', goal.x, goal.y, goal.z])
+        if (pathAttempts === 1) throw new Error('No path to the goal!')
+      }
+    }
+    bot.placeBlock = async (reference, faceVector) => events.push(['placeBlock', reference.name, faceVector.x, faceVector.y, faceVector.z])
+
+    const harvested = await runFarmingTask(bot, {
+      originPosition: combatPosition(0, 64, 0),
+      openNearbyDoor: async () => {
+        events.push(['openDoor'])
+        return true
+      },
+      debugLog: (event, data) => entries.push({ event, data })
+    })
+
+    assert.strictEqual(harvested, 1)
+    assert.deepStrictEqual(events, [
+      ['goto', 1, 64, 0],
+      ['openDoor'],
+      ['goto', 1, 64, 0],
+      ['dig', 'wheat'],
+      ['equip', 'wheat_seeds', 'hand'],
+      ['placeBlock', 'farmland', 0, 1, 0]
+    ])
+    assert(entries.some(entry => entry.event === 'automation.farming.door.retry'))
+  })
+
+  it('keeps cutting wood until four stacks are collected', async () => {
+    const { runWoodCuttingQuotaTask } = require('../bot')
+    const events = []
+    const bot = blockBot([], events)
+    let woodCount = 0
+
+    const completed = await runWoodCuttingQuotaTask(bot, {
+      targetWoodCount: 256,
+      debugLog: () => {},
+      sleep: async () => {},
+      countWoodItems: () => woodCount,
+      runWoodCuttingCycle: async () => {
+        events.push(['woodCycle', woodCount])
+        woodCount += 64
+        return true
+      },
+      depositWoodAtHome: async () => events.push(['depositWood'])
+    })
+
+    assert.strictEqual(completed, true)
+    assert.deepStrictEqual(events, [
+      ['woodCycle', 0],
+      ['woodCycle', 64],
+      ['woodCycle', 128],
+      ['woodCycle', 192],
+      ['depositWood']
+    ])
+  })
+
+  it('backs off after repeated empty wood cutting cycles', async () => {
+    const { runWoodCuttingQuotaTask } = require('../bot')
+    const events = []
+    const bot = blockBot([], events)
+    let calls = 0
+    let woodCount = 0
+
+    await runWoodCuttingQuotaTask(bot, {
+      targetWoodCount: 1,
+      loopDelayMs: 100,
+      debugLog: () => {},
+      sleep: async ms => events.push(['sleep', ms]),
+      countWoodItems: () => woodCount,
+      runWoodCuttingCycle: async () => {
+        calls++
+        events.push(['woodCycle', calls])
+        if (calls === 3) woodCount = 1
+        return calls === 3
+      },
+      depositWoodAtHome: async () => events.push(['depositWood'])
+    })
+
+    assert.deepStrictEqual(events, [
+      ['woodCycle', 1],
+      ['sleep', 200],
+      ['woodCycle', 2],
+      ['sleep', 300],
+      ['woodCycle', 3],
+      ['depositWood']
+    ])
+  })
+
+  it('replants a matching sapling after cutting a tree', async () => {
+    const { replantSaplingNearTree } = require('../bot')
+    const events = []
+    const dirt = block('dirt', 0, 63, 0)
+    const oakSapling = { name: 'oak_sapling', type: 6, count: 1 }
+    const bot = blockBot([dirt], events)
+    bot.inventory.items = () => [oakSapling]
+    bot.placeBlock = async (reference, faceVector) => events.push(['placeBlock', reference.name, faceVector.x, faceVector.y, faceVector.z])
+
+    const planted = await replantSaplingNearTree(bot, block('oak_log', 0, 64, 0), {
+      debugLog: () => {}
+    })
+
+    assert.strictEqual(planted, true)
+    assert.deepStrictEqual(events, [
+      ['equip', 'oak_sapling', 'hand'],
+      ['placeBlock', 'dirt', 0, 1, 0]
+    ])
+  })
+
+  it('only attacks passive mobs at least 100 blocks from home', async () => {
+    const { runWildRoamingTask } = require('../bot')
+    const events = []
+    const nearCow = {
+      type: 'mob',
+      name: 'cow',
+      position: combatPosition(50, 64, 0)
+    }
+    const farChicken = {
+      type: 'mob',
+      name: 'chicken',
+      position: combatPosition(120, 64, 0)
+    }
+    const bot = combatBot([{ name: 'iron_sword' }], events)
+    bot.entity.position = combatPosition(0, 64, 0)
+    bot.entities = { 1: nearCow, 2: farChicken }
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.x, goal.y, goal.z]),
+      setGoal: goal => events.push(['setGoal', goal])
+    }
+
+    const attacked = await runWildRoamingTask(bot, {
+      originPosition: combatPosition(0, 64, 0),
+      minimumHuntDistance: 100,
+      debugLog: () => {},
+      sleep: async () => {}
+    })
+
+    assert.strictEqual(attacked, true)
+    assert.deepStrictEqual(events, [
+      ['goto', 120, 64, 0],
+      ['equip', 'iron_sword', 'hand'],
+      ['attack', 'chicken']
+    ])
+  })
+
+  it('runs daytime tasks in farming, wood cutting, wild roaming order', async () => {
+    const { runDaytimeAutomationSequence } = require('../bot')
+    const events = []
+    const bot = blockBot([], events)
+    bot.time = { isDay: true, timeOfDay: 1000 }
+
+    await runDaytimeAutomationSequence(bot, {
+      debugLog: () => {},
+      originPosition: combatPosition(0, 64, 0),
+      tasks: [
+        { name: 'farming', run: async () => events.push(['task', 'farming']) },
+        { name: 'woodCutting', run: async () => events.push(['task', 'woodCutting']) },
+        { name: 'wildRoaming', run: async () => events.push(['task', 'wildRoaming']) }
+      ]
+    })
+
+    assert.deepStrictEqual(events, [
+      ['task', 'farming'],
+      ['task', 'woodCutting'],
+      ['task', 'wildRoaming']
+    ])
+  })
+
+  it('randomizes the default daytime task order', () => {
+    const { createDaytimeTaskOrder } = require('../bot')
+
+    const wildFirst = createDaytimeTaskOrder({
+      random: sequenceRandom([0, 0.9])
+    })
+    const normalOrder = createDaytimeTaskOrder({
+      random: sequenceRandom([0.9, 0.9])
+    })
+
+    assert.deepStrictEqual(wildFirst.map(task => task.name), [
+      'Wild Roaming',
+      'Wood Cutting',
+      'Farming'
+    ])
+    assert.deepStrictEqual(normalOrder.map(task => task.name), [
+      'Farming',
+      'Wood Cutting',
+      'Wild Roaming'
+    ])
+  })
+
+  it('only repeats wild roaming until night when it is the final randomized task', () => {
+    const { createDaytimeTaskOrder } = require('../bot')
+
+    const wildFirst = createDaytimeTaskOrder({
+      random: sequenceRandom([0, 0.9])
+    })
+    const wildLast = createDaytimeTaskOrder({
+      random: sequenceRandom([0.9, 0.9])
+    })
+
+    assert.strictEqual(wildFirst.find(task => task.name === 'Wild Roaming').repeatUntilNight, false)
+    assert.strictEqual(wildLast.find(task => task.name === 'Wild Roaming').repeatUntilNight, true)
+  })
+
+  it('uses a 32 wood target for the default daytime wood cutting task', async () => {
+    const { createDefaultDaytimeTasks } = require('../bot')
+    const events = []
+    const bot = blockBot([], events)
+    const woodTask = createDefaultDaytimeTasks().find(task => task.name === 'Wood Cutting')
+    let woodCount = 0
+    let cycles = 0
+    let targetWoodCount = null
+
+    const completed = await woodTask.run(bot, {
+      debugLog: (event, data) => {
+        if (event === 'automation.woodcutting.quota.done') targetWoodCount = data.targetWoodCount
+      },
+      sleep: async () => {},
+      countWoodItems: () => woodCount,
+      runWoodCuttingCycle: async () => {
+        cycles++
+        woodCount += 32
+        return true
+      },
+      depositWoodAtHome: async () => events.push(['depositWood']),
+      shouldStop: () => cycles >= 1
+    })
+
+    assert.strictEqual(completed, true)
+    assert.strictEqual(cycles, 1)
+    assert.strictEqual(targetWoodCount, 32)
+  })
+
+  it('keeps wild roaming until night starts', async () => {
+    const { runDaytimeAutomationSequence } = require('../bot')
+    const events = []
+    const bot = blockBot([], events)
+    bot.time = { isDay: true, timeOfDay: 1000 }
+    let wildRuns = 0
+
+    await runDaytimeAutomationSequence(bot, {
+      debugLog: () => {},
+      originPosition: combatPosition(0, 64, 0),
+      tasks: [
+        {
+          name: 'Wild Roaming',
+          repeatUntilNight: true,
+          run: async () => {
+            wildRuns++
+            events.push(['wildRun', wildRuns])
+            if (wildRuns === 2) bot.time = { isDay: false, timeOfDay: 14000 }
+            return true
+          }
+        }
+      ]
+    })
+
+    assert.deepStrictEqual(events, [
+      ['wildRun', 1],
+      ['wildRun', 2]
+    ])
+  })
+
+  it('gears up from a nearby chest during the day when required items are missing', async () => {
+    const { runDayGearCycle } = require('../bot')
+    const events = []
+    const chestBlock = block('chest', 3, 64, 0)
+    const sword = { name: 'iron_sword', type: 267, count: 1 }
+    const axe = { name: 'iron_axe', type: 258, count: 1 }
+    const pickaxe = { name: 'iron_pickaxe', type: 257, count: 1 }
+    const bread = { name: 'bread', type: 297, count: 8 }
+    const chest = {
+      containerItems: () => [sword, axe, pickaxe, bread],
+      withdraw: async (type, metadata, count) => events.push(['withdraw', type, count]),
+      close: () => events.push(['close'])
+    }
+    const bot = blockBot([chestBlock], events)
+    bot.time = { isDay: true, timeOfDay: 1000 }
+    bot.registry = {
+      foodsByName: {
+        bread: { foodPoints: 5, saturation: 6 }
+      }
+    }
+    bot.inventory.items = () => []
+    bot.openContainer = async () => chest
+
+    await runDayGearCycle(bot, {
+      debugLog: () => {}
+    })
+
+    assert.deepStrictEqual(events, [
+      ['withdraw', 267, 1],
+      ['withdraw', 258, 1],
+      ['withdraw', 257, 1],
+      ['withdraw', 297, 8],
+      ['close']
+    ])
+  })
+
+  it('wakes up during the day even when gear is already complete', async () => {
+    const { runDayGearCycle } = require('../bot')
+    const events = []
+    const bot = blockBot([], events)
+    bot.isSleeping = true
+    bot.wake = async () => events.push(['wake'])
+    bot.registry = {
+      foodsByName: {
+        bread: { foodPoints: 5, saturation: 6 }
+      }
+    }
+    bot.inventory.items = () => [
+      { name: 'stone_sword', type: 272, count: 1 },
+      { name: 'stone_axe', type: 275, count: 1 },
+      { name: 'stone_pickaxe', type: 274, count: 1 },
+      { name: 'bread', type: 297, count: 8 }
+    ]
+
+    const gearedUp = await runDayGearCycle(bot, {
+      debugLog: () => {}
+    })
+
+    assert.strictEqual(gearedUp, true)
+    assert.deepStrictEqual(events, [
+      ['wake']
+    ])
+  })
+
+  it('does not run the night safety loop while physics is disabled in the lobby', async () => {
+    const { attachNightSafety } = require('../bot')
+    const bot = new EventEmitter()
+    const events = []
+    bot.physicsEnabled = false
+    bot.time = { isDay: false, timeOfDay: 14000 }
+    bot.chat = command => events.push(['chat', command])
+
+    attachNightSafety(bot, {
+      sleep: async () => {},
+      debugLog: () => {}
+    })
+
+    bot.emit('time')
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [])
+  })
+
+  it('does not start daytime automation when physics becomes enabled after a daytime spawn', async () => {
+    const { attachNightSafety } = require('../bot')
+    const bot = new EventEmitter()
+    const events = []
+    bot.physicsEnabled = false
+    bot.time = { isDay: true, timeOfDay: 1000 }
+    bot.entity = { position: combatPosition(0, 64, 0) }
+
+    attachNightSafety(bot, {
+      checkIntervalMs: 0,
+      debugLog: () => {},
+      runNightSafetyCycle: async () => events.push(['night']),
+      runDayGearCycle: async () => events.push(['gear']),
+      runDaytimeAutomationSequence: async () => events.push(['daytime'])
+    })
+
+    bot.emit('spawn')
+    await new Promise(resolve => setImmediate(resolve))
+    bot.physicsEnabled = true
+    bot.emit('physicsEnabled')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [
+      ['gear']
+    ])
+  })
+
+  it('leaves the house during daytime without starting automation automatically', async () => {
+    const { attachNightSafety } = require('../bot')
+    const bot = new EventEmitter()
+    const events = []
+    bot.physicsEnabled = true
+    bot.time = { isDay: true, timeOfDay: 1000 }
+    bot.entity = { position: combatPosition(0, 68, 0) }
+
+    attachNightSafety(bot, {
+      checkIntervalMs: 0,
+      debugLog: () => {},
+      runDayGearCycle: async () => events.push(['gear']),
+      leaveHomeForDaytime: async () => events.push(['exit']),
+      runDaytimeAutomationSequence: async () => events.push(['daytime'])
+    })
+
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [
+      ['gear'],
+      ['exit']
+    ])
+  })
+
+  it('passes the home door opener into daytime automation', async () => {
+    const { attachNightSafety } = require('../bot')
+    const bot = new EventEmitter()
+    const events = []
+    bot.physicsEnabled = true
+    bot.time = { isDay: true, timeOfDay: 1000 }
+    bot.entity = { position: combatPosition(0, 68, 0) }
+
+    attachNightSafety(bot, {
+      checkIntervalMs: 0,
+      autoStartDaytimeAutomation: true,
+      debugLog: () => {},
+      runDayGearCycle: async () => events.push(['gear']),
+      leaveHomeForDaytime: async () => events.push(['exit']),
+      runDaytimeAutomationSequence: async (taskBot, options) => {
+        events.push(['doorOpener', typeof options.openNearbyDoor])
+      }
+    })
+
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [
+      ['gear'],
+      ['exit'],
+      ['doorOpener', 'function']
+    ])
+  })
+
+  it('runs the night safety loop immediately when attached during night', async () => {
+    const { attachNightSafety } = require('../bot')
+    const bot = new EventEmitter()
+    const events = []
+    bot.physicsEnabled = true
+    bot.time = { isDay: false, timeOfDay: 14000 }
+    bot.chat = command => events.push(['chat', command])
+
+    attachNightSafety(bot, {
+      checkIntervalMs: 0,
+      sleep: async () => {},
+      debugLog: () => {}
+    })
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [['chat', '/home home']])
+  })
+
+  it('retries the night safety loop during the same night when the previous attempt does not complete', async () => {
+    const { attachNightSafety } = require('../bot')
+    const bot = new EventEmitter()
+    const events = []
+    bot.physicsEnabled = false
+    bot.time = { isDay: false, timeOfDay: 14000 }
+
+    const controller = attachNightSafety(bot, {
+      checkIntervalMs: 0,
+      nightRetryDelayMs: 0,
+      debugLog: () => {},
+      runNightSafetyCycle: async () => {
+        events.push(['night'])
+        return events.length > 1
+      }
+    })
+
+    await new Promise(resolve => setImmediate(resolve))
+    bot.physicsEnabled = true
+    await controller.check()
+    await controller.check()
+
+    assert.deepStrictEqual(events, [['night'], ['night']])
+  })
+
+  it('does not spam night safety retries before the retry delay has passed', async () => {
+    const { attachNightSafety } = require('../bot')
+    const bot = new EventEmitter()
+    const events = []
+    let now = 1000
+    bot.physicsEnabled = false
+    bot.time = { isDay: false, timeOfDay: 14000 }
+
+    const controller = attachNightSafety(bot, {
+      checkIntervalMs: 0,
+      nightRetryDelayMs: 5000,
+      now: () => now,
+      debugLog: () => {},
+      runNightSafetyCycle: async () => {
+        events.push(['night', now])
+        return false
+      }
+    })
+
+    await new Promise(resolve => setImmediate(resolve))
+    bot.physicsEnabled = true
+    await controller.check()
+    await controller.check()
+    now = 6001
+    await controller.check()
+
+    assert.deepStrictEqual(events, [
+      ['night', 1000],
+      ['night', 6001]
+    ])
+  })
+
+  it('does not teleport home again when retrying night safety near the home anchor', async () => {
+    const { attachNightSafety } = require('../bot')
+    const bot = new EventEmitter()
+    const events = []
+    bot.physicsEnabled = false
+    bot.time = { isDay: false, timeOfDay: 14000 }
+    bot.entity = { position: combatPosition(0, 64, 0) }
+
+    const controller = attachNightSafety(bot, {
+      checkIntervalMs: 0,
+      nightRetryDelayMs: 0,
+      debugLog: () => {},
+      runNightSafetyCycle: async (nightBot, options) => {
+        events.push(['skipHomeTeleport', options.skipHomeTeleport === true])
+        if (events.length === 1) {
+          nightBot.__nightSafetyHomeAnchor = combatPosition(0, 64, 0)
+          return false
+        }
+        return true
+      }
+    })
+
+    await new Promise(resolve => setImmediate(resolve))
+    bot.physicsEnabled = true
+    await controller.check()
+    await controller.check()
+
+    assert.deepStrictEqual(events, [
+      ['skipHomeTeleport', false],
+      ['skipHomeTeleport', true]
+    ])
+  })
+
+  it('polls current time when no Mineflayer time event fires', async () => {
+    const { attachNightSafety } = require('../bot')
+    const bot = new EventEmitter()
+    const events = []
+    let pollTime
+    bot.physicsEnabled = true
+    bot.chat = command => events.push(['chat', command])
+
+    attachNightSafety(bot, {
+      sleep: async () => {},
+      debugLog: () => {},
+      setInterval: (fn) => {
+        pollTime = fn
+        return { unref: () => {} }
+      },
+      clearInterval: () => {}
+    })
+
+    assert.strictEqual(typeof pollTime, 'function')
+    bot.time = { isDay: false, timeOfDay: 14000 }
+    await pollTime()
+
+    assert.deepStrictEqual(events, [['chat', '/home home']])
   })
 
   it('manually respawns after death and teleports home after spawning', async () => {
@@ -1785,6 +2964,11 @@ function combatPosition (x, y, z) {
     ),
     offset: (dx, dy, dz) => combatPosition(x + dx, y + dy, z + dz)
   }
+}
+
+function sequenceRandom (values) {
+  let index = 0
+  return () => values[Math.min(index++, values.length - 1)]
 }
 
 function blockBot (blocks = [], events = []) {

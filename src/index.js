@@ -6,12 +6,16 @@ module.exports = {
   ...require('./commandConsole'),
   ...require('./config'),
   ...require('./createBot'),
+  ...require('./daytimeTasks'),
   ...require('./deathRecovery'),
   ...require('./debugLogger'),
   ...require('./eventLogging'),
+  ...require('./farming'),
   ...require('./homes'),
+  ...require('./nightSafety'),
   ...require('./survival'),
   ...require('./viewer'),
+  ...require('./wildRoaming'),
   ...require('./woodcutting'),
   ...require('./windows')
 }

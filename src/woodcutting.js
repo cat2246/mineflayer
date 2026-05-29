@@ -36,6 +36,10 @@ function isWoodItemName (name = '') {
   return /_(log|stem|wood|hyphae)$/i.test(name)
 }
 
+function isSaplingItemName (name = '') {
+  return /_sapling$/i.test(name) || name === 'mangrove_propagule' || name === 'crimson_fungus' || name === 'warped_fungus'
+}
+
 const SCAFFOLD_ITEM_PRIORITY = [
   'dirt',
   'coarse_dirt',
@@ -51,6 +55,8 @@ const SCAFFOLD_ITEM_PRIORITY = [
   'sand',
   'gravel'
 ]
+
+const WOODCUTTING_IGNORED_TREE_CLUSTER_RADIUS = 2
 
 function isContainerBlockName (name = '') {
   return /^(chest|trapped_chest|barrel)$/i.test(name)
@@ -94,6 +100,11 @@ function positionKey (position) {
   return `${position.x},${position.y},${position.z}`
 }
 
+function columnKey (position) {
+  if (!position) return 'unknown'
+  return `${position.x},${position.z}`
+}
+
 function currentTime (options = {}) {
   return typeof options.now === 'function' ? options.now() : Date.now()
 }
@@ -106,14 +117,48 @@ function ignoredLogMap (bot) {
   return bot.__woodcuttingIgnoredLogs
 }
 
+function ignoredTreeAreaMap (bot) {
+  if (!bot.__woodcuttingIgnoredTreeAreas) {
+    bot.__woodcuttingIgnoredTreeAreas = new Map()
+  }
+
+  return bot.__woodcuttingIgnoredTreeAreas
+}
+
+function horizontalDistanceBetween (a, b) {
+  return Math.sqrt(
+    Math.pow(a.x - b.x, 2) +
+    Math.pow(a.z - b.z, 2)
+  )
+}
+
+function isIgnoredTreeArea (bot, block, options = {}) {
+  if (!block?.position) return false
+  const now = currentTime(options)
+  const areas = ignoredTreeAreaMap(bot)
+
+  for (const [key, area] of areas.entries()) {
+    if (area.ignoredUntil <= now) {
+      areas.delete(key)
+      continue
+    }
+
+    if (horizontalDistanceBetween(area.position, block.position) <= area.radius) {
+      return true
+    }
+  }
+
+  return false
+}
+
 function isIgnoredTreeLog (bot, block, options = {}) {
   const key = positionKey(block?.position)
   const ignoredUntil = ignoredLogMap(bot).get(key)
-  if (!ignoredUntil) return false
+  if (!ignoredUntil) return isIgnoredTreeArea(bot, block, options)
 
   if (ignoredUntil <= currentTime(options)) {
     ignoredLogMap(bot).delete(key)
-    return false
+    return isIgnoredTreeArea(bot, block, options)
   }
 
   return true
@@ -123,13 +168,20 @@ function ignoreTreeLog (bot, block, options = {}, reason = 'unreachable') {
   const debugLog = options.debugLog || (() => {})
   const ignoredLogMs = options.ignoredLogMs ?? WOODCUTTING_IGNORED_LOG_MS
   const ignoredUntil = currentTime(options) + ignoredLogMs
+  const clusterRadius = options.ignoredTreeClusterRadius ?? WOODCUTTING_IGNORED_TREE_CLUSTER_RADIUS
 
   ignoredLogMap(bot).set(positionKey(block.position), ignoredUntil)
+  ignoredTreeAreaMap(bot).set(columnKey(block.position), {
+    position: positionData(block.position),
+    ignoredUntil,
+    radius: clusterRadius
+  })
   debugLog('automation.woodcutting.ignoreLog', {
     block: block.name,
     position: positionData(block.position),
     reason,
-    ignoredLogMs
+    ignoredLogMs,
+    clusterRadius
   })
 }
 
@@ -853,6 +905,65 @@ function findAxe (bot) {
   return items.find(item => /_axe$/i.test(item.name || '')) || null
 }
 
+function saplingNameForLog (logName = '') {
+  const match = logName.match(/^(.+?)_(?:log|wood|stem|hyphae)$/i)
+  if (!match) return null
+  const treeName = match[1]
+  if (treeName === 'mangrove') return 'mangrove_propagule'
+  if (treeName === 'crimson') return 'crimson_fungus'
+  if (treeName === 'warped') return 'warped_fungus'
+  return `${treeName}_sapling`
+}
+
+function findSaplingForLog (bot, logName) {
+  const preferredName = saplingNameForLog(logName)
+  const items = typeof bot.inventory?.items === 'function' ? bot.inventory.items() : []
+  return items.find(item => item.name === preferredName) ||
+    items.find(item => isSaplingItemName(item.name)) ||
+    null
+}
+
+function isSaplingSoilName (name = '') {
+  return /^(dirt|grass_block|podzol|coarse_dirt|rooted_dirt|moss_block|mud|mycelium|netherrack|crimson_nylium|warped_nylium)$/i.test(name)
+}
+
+async function replantSaplingNearTree (bot, treeLog, options = {}) {
+  const debugLog = options.debugLog || (() => {})
+  const sapling = findSaplingForLog(bot, treeLog?.name)
+  if (!sapling || !treeLog?.position || typeof bot.placeBlock !== 'function') return false
+
+  const offsets = [
+    [0, -1, 0],
+    [1, -1, 0],
+    [-1, -1, 0],
+    [0, -1, 1],
+    [0, -1, -1]
+  ]
+
+  for (const [x, y, z] of offsets) {
+    const referenceBlock = bot.blockAt(treeLog.position.offset(x, y, z))
+    if (!referenceBlock || !isSaplingSoilName(referenceBlock.name)) continue
+
+    try {
+      await bot.equip(sapling, 'hand')
+      await bot.placeBlock(referenceBlock, vec3(0, 1, 0))
+      debugLog('automation.woodcutting.replant', {
+        item: sapling.name,
+        reference: positionData(referenceBlock.position)
+      })
+      return true
+    } catch (err) {
+      debugLog('automation.woodcutting.replantFailed', {
+        item: sapling.name,
+        reference: positionData(referenceBlock.position),
+        message: err.message
+      })
+    }
+  }
+
+  return false
+}
+
 async function equipBestWoodTool (bot, block) {
   const tool = typeof bot.pathfinder?.bestHarvestTool === 'function'
     ? bot.pathfinder.bestHarvestTool(block)
@@ -909,6 +1020,8 @@ async function cutTreeLog (bot, treeLog, options = {}) {
   await waitAfterDig(treeLog, options)
   if (isWoodcuttingStopped(bot, options)) return false
   await collectNearbyDrops(bot, treeLog.position, options)
+  if (isWoodcuttingStopped(bot, options)) return false
+  await replantSaplingNearTree(bot, treeLog, options)
   if (isWoodcuttingStopped(bot, options)) return false
   debugLog('automation.woodcutting.cut', {
     block: treeLog.name,
@@ -981,6 +1094,60 @@ async function runWoodCuttingCycle (bot, options = {}) {
   return cutTreeLog(bot, treeLog, options)
 }
 
+function countWoodItems (bot) {
+  return (typeof bot.inventory?.items === 'function' ? bot.inventory.items() : [])
+    .filter(item => isWoodItemName(item.name))
+    .reduce((sum, item) => sum + item.count, 0)
+}
+
+function woodcuttingLoopDelay (options, emptyCycles) {
+  const loopDelayMs = options.loopDelayMs ?? WOODCUTTING_LOOP_DELAY_MS
+  if (emptyCycles <= 0) return loopDelayMs
+
+  const maxMultiplier = options.maxEmptyCycleBackoffMultiplier ?? 5
+  return loopDelayMs * Math.min(emptyCycles + 1, maxMultiplier)
+}
+
+async function runWoodCuttingQuotaTask (bot, options = {}) {
+  const debugLog = options.debugLog || (() => {})
+  const targetWoodCount = options.targetWoodCount ?? 256
+  const wait = options.sleep || sleep
+  const cycle = options.runWoodCuttingCycle || runWoodCuttingCycle
+  const deposit = options.depositWoodAtHome || depositWoodAtHome
+  const woodCounter = options.countWoodItems || countWoodItems
+  let lastCount = woodCounter(bot)
+  let collected = 0
+  let emptyCycles = 0
+
+  while (!bot._ended && !options.shouldStop?.() && collected < targetWoodCount) {
+    const before = woodCounter(bot)
+    const ran = await cycle(bot, options)
+    const after = woodCounter(bot)
+    collected += Math.max(0, after - before)
+    lastCount = after
+
+    if (!ran || after <= before) {
+      emptyCycles++
+      if (emptyCycles > 0) {
+        options.roamRadius = (options.roamRadius || WOODCUTTING_ROAM_RADIUS) + WOODCUTTING_ROAM_RADIUS
+      }
+    } else {
+      emptyCycles = 0
+    }
+
+    if (collected >= targetWoodCount || lastCount >= targetWoodCount) break
+    await wait(woodcuttingLoopDelay(options, emptyCycles))
+  }
+
+  if (!bot._ended && !options.shouldStop?.()) await deposit(bot, options)
+  debugLog('automation.woodcutting.quota.done', {
+    collected,
+    inventoryWood: lastCount,
+    targetWoodCount
+  })
+  return collected >= targetWoodCount || lastCount >= targetWoodCount
+}
+
 function startWoodCuttingAutomation (bot, options = {}) {
   const wait = options.sleep || sleep
   const debugLog = options.debugLog || (() => {})
@@ -1032,11 +1199,14 @@ function getRandomInt (min, max) {
 
 module.exports = {
   cutTreeLog,
+  countWoodItems,
   depositWoodAtHome,
   findNaturalTreeLog,
   isInventoryAlmostFull,
   isNaturalTreeLog,
+  replantSaplingNearTree,
   roamForTrees,
   runWoodCuttingCycle,
+  runWoodCuttingQuotaTask,
   startWoodCuttingAutomation
 }

@@ -193,6 +193,10 @@ function isParsedWhisperTail (botName, message) {
   return new RegExp(`^${escapedName}\\]\\s+`, 'i').test(message)
 }
 
+function isServerAnnouncementUsername (username) {
+  return /^(joined|left|discord|mcmmo|holoquiz)$/i.test(String(username || ''))
+}
+
 async function respondWithCodex (bot, request, options) {
   const debugLog = options.debugLog || (() => {})
   const errorOutput = options.errorOutput || console.error
@@ -255,7 +259,13 @@ function attachAiChat (bot, options = {}) {
 
   bot.on('chat', (username, message) => {
     const botName = state.botName || bot.username
-    if (!username || username === bot.username || isParsedWhisperTail(botName, message) || !mentionsBot(botName, message)) return
+    if (
+      !username ||
+      username === bot.username ||
+      isServerAnnouncementUsername(username) ||
+      isParsedWhisperTail(botName, message) ||
+      !mentionsBot(botName, message)
+    ) return
 
     respondWithCodex(bot, {
       channel: 'public',
@@ -277,6 +287,7 @@ module.exports = {
   createCodexCliRunner,
   createCodexPrompt,
   extractCodexCliPathFromConfig,
+  isServerAnnouncementUsername,
   isParsedWhisperTail,
   loadAgentInstructions,
   loadConfiguredCodexCliPath,
