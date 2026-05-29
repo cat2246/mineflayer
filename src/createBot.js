@@ -1,5 +1,6 @@
 const mineflayer = require('mineflayer')
 const { pathfinder, Movements } = require('mineflayer-pathfinder')
+const { attachAiChat } = require('./aiChat')
 const { attachAutoEat } = require('./autoEat')
 const { buildBotOptions } = require('./config')
 const { attachCombat } = require('./combat')
@@ -52,6 +53,7 @@ function createBot (options = buildBotOptions()) {
   attachAutoEat(bot, { debugLog })
   startConsole(bot, { debugLog })
   attachCombat(bot, { debugLog })
+  attachAiChat(bot, { debugLog })
   attachShutdownHandlers(bot)
   return bot
 }

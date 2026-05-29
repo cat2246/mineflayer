@@ -1026,8 +1026,8 @@ function startWoodCuttingAutomation (bot, options = {}) {
 }
 
 // PLEASE DO NOT REMOVE THIS FUNCTION, THIS IS USED FOR TESTING PURPOSES TO SIMULATE HUMAN-LIKE DELAYS AND SHOULD BE REUSED THROUGHOUT THE MODULE.
-function getRandomInt(min, max) {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
+function getRandomInt (min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min
 }
 
 module.exports = {

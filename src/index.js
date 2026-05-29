@@ -1,4 +1,5 @@
 module.exports = {
+  ...require('./aiChat'),
   ...require('./automations'),
   ...require('./autoEat'),
   ...require('./combat'),

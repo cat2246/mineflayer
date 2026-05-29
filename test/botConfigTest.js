@@ -2,6 +2,9 @@
 
 const assert = require('assert')
 const EventEmitter = require('events')
+const fs = require('fs')
+const os = require('os')
+const path = require('path')
 
 describe('holocraft bot config', function () {
   this.timeout(10000)
@@ -606,6 +609,228 @@ describe('holocraft bot config', function () {
 
     assert.deepStrictEqual(events, [])
     assert(output.some(message => message.includes('Usage: /message <message-or-command>')))
+  })
+
+  it('builds Codex CLI args for GPT-5.4 fast responses', () => {
+    const { buildCodexCliArgs } = require('../bot')
+
+    const args = buildCodexCliArgs('hello', {
+      model: 'gpt-5.4',
+      reasoningEffort: 'low',
+      serviceTier: 'fast',
+      cwd: 'C:\\bots\\mineflayer'
+    })
+
+    assert.deepStrictEqual(args, [
+      'exec',
+      '--model',
+      'gpt-5.4',
+      '-c',
+      'model_reasoning_effort="low"',
+      '-c',
+      'service_tier="fast"',
+      '--sandbox',
+      'read-only',
+      '--ignore-user-config',
+      '--ignore-rules',
+      '--skip-git-repo-check',
+      '--ephemeral',
+      '--cd',
+      'C:\\bots\\mineflayer',
+      '-'
+    ])
+  })
+
+  it('builds Codex options from environment overrides', () => {
+    const { buildCodexOptions } = require('../bot')
+
+    assert.deepStrictEqual(buildCodexOptions({
+      CODEX_AI_COMMAND: 'codex-dev',
+      CODEX_AI_MODEL: 'gpt-test',
+      CODEX_AI_REASONING_EFFORT: 'medium',
+      CODEX_AI_SERVICE_TIER: 'standard',
+      CODEX_AI_TIMEOUT_MS: '5000'
+    }), {
+      command: 'codex-dev',
+      model: 'gpt-test',
+      reasoningEffort: 'medium',
+      serviceTier: 'standard',
+      timeout: 5000,
+      cwd: path.join(os.tmpdir(), 'mineflayer-codex-chat')
+    })
+  })
+
+  it('runs Codex chat from an isolated workspace by default', () => {
+    const { buildCodexOptions } = require('../bot')
+
+    const options = buildCodexOptions({})
+
+    assert.strictEqual(options.cwd, path.join(os.tmpdir(), 'mineflayer-codex-chat'))
+  })
+
+  it('allows overriding the isolated Codex chat workspace', () => {
+    const { buildCodexOptions } = require('../bot')
+
+    const options = buildCodexOptions({
+      CODEX_AI_WORKSPACE: 'C:\\safe-chat-workspace'
+    })
+
+    assert.strictEqual(options.cwd, 'C:\\safe-chat-workspace')
+  })
+
+  it('uses CODEX_CLI_PATH when resolving the Codex command', () => {
+    const { buildCodexOptions } = require('../bot')
+
+    const options = buildCodexOptions({
+      CODEX_CLI_PATH: 'C:\\Users\\bot\\codex.exe'
+    })
+
+    assert.strictEqual(options.command, 'C:\\Users\\bot\\codex.exe')
+  })
+
+  it('falls back to the Codex CLI path stored in the Codex config', () => {
+    const { buildCodexOptions } = require('../bot')
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mineflayer-codex-'))
+    const configPath = path.join(tempDir, 'config.toml')
+    fs.writeFileSync(configPath, "CODEX_CLI_PATH = 'C:\\Users\\bot\\AppData\\Local\\OpenAI\\Codex\\codex.exe'\n")
+
+    try {
+      const options = buildCodexOptions({}, { configPath })
+
+      assert.strictEqual(options.command, 'C:\\Users\\bot\\AppData\\Local\\OpenAI\\Codex\\codex.exe')
+    } finally {
+      fs.rmSync(tempDir, { force: true, recursive: true })
+    }
+  })
+
+  it('sends private /message whispers to Codex and whispers the answer back', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const requests = []
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => events.push(['chat', message])
+    bot.whisper = (username, message) => events.push(['whisper', username, message])
+
+    attachAiChat(bot, {
+      runCodex: async request => {
+        requests.push(request)
+        return '  hello from codex  '
+      },
+      agentInstructions: 'Be concise.'
+    })
+
+    bot.emit('whisper', 'Steve', 'where are you?')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.strictEqual(requests.length, 1)
+    assert.strictEqual(requests[0].channel, 'private')
+    assert.strictEqual(requests[0].username, 'Steve')
+    assert.strictEqual(requests[0].message, 'where are you?')
+    assert.deepStrictEqual(events, [['whisper', 'Steve', 'hello from codex']])
+  })
+
+  it('does not treat a parsed whisper tail as a public bot mention', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const requests = []
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => events.push(['chat', message])
+    bot.whisper = (username, message) => events.push(['whisper', username, message])
+
+    attachAiChat(bot, {
+      runCodex: async request => {
+        requests.push(request)
+        return 'I am doing well.'
+      }
+    })
+
+    bot.emit('whisper', 'Cat2246', 'Hi PokiMoki82719, how are you?')
+    bot.emit('chat', 'Cat2246', 'me] Hi PokiMoki82719, how are you?')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.strictEqual(requests.length, 1)
+    assert.strictEqual(requests[0].channel, 'private')
+    assert.deepStrictEqual(events, [['whisper', 'Cat2246', 'I am doing well.']])
+  })
+
+  it('sends bot mentions in public chat to Codex and replies in chat', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const requests = []
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => events.push(['chat', message])
+    bot.whisper = (username, message) => events.push(['whisper', username, message])
+
+    attachAiChat(bot, {
+      runCodex: async request => {
+        requests.push(request)
+        return 'I can help.'
+      },
+      agentInstructions: 'Be concise.'
+    })
+
+    bot.emit('chat', 'Alex', 'PokiMoki82719 can you help?')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.strictEqual(requests.length, 1)
+    assert.strictEqual(requests[0].channel, 'public')
+    assert.strictEqual(requests[0].username, 'Alex')
+    assert.deepStrictEqual(events, [['chat', '@Alex I can help.']])
+  })
+
+  it('ignores public chat without a bot mention and its own messages', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => events.push(['chat', message])
+    bot.whisper = (username, message) => events.push(['whisper', username, message])
+
+    attachAiChat(bot, {
+      runCodex: async () => {
+        throw new Error('Codex should not run')
+      }
+    })
+
+    bot.emit('chat', 'Alex', 'hello everyone')
+    bot.emit('chat', 'PokiMoki82719', 'PokiMoki82719 status')
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [])
+  })
+
+  it('prints Codex errors to the terminal without replying in Minecraft chat', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const terminalErrors = []
+    const bot = new EventEmitter()
+    const err = new Error('spawn codex ENOENT')
+    err.stderr = 'codex was not found'
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => events.push(['chat', message])
+    bot.whisper = (username, message) => events.push(['whisper', username, message])
+
+    attachAiChat(bot, {
+      errorOutput: message => terminalErrors.push(message),
+      runCodex: async () => {
+        throw err
+      }
+    })
+
+    bot.emit('whisper', 'Cat2246', 'Seem like you are not working properly')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [])
+    assert(terminalErrors.some(message => message.includes('AI chat error for Cat2246')))
+    assert(terminalErrors.some(message => message.includes('spawn codex ENOENT')))
+    assert(terminalErrors.some(message => message.includes('codex was not found')))
   })
 
   it('detects natural tree logs only when leaves are nearby', () => {
