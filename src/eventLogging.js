@@ -1,12 +1,23 @@
 const { DEFAULT_HOST, PHYSICS_ENABLE_DELAY_MS } = require('./config')
 const { createDebugLogger } = require('./debugLogger')
-const { joinSurvivalWorld } = require('./survival')
+const { joinSurvivalWorld, loginToServer } = require('./survival')
 const { sleep } = require('./time')
 const { startViewer } = require('./viewer')
 const { summarizeWindowItems } = require('./windows')
 
+function isIgnorableParticleDecodeError (err) {
+  const text = [
+    err?.name,
+    err?.message,
+    err?.stack
+  ].filter(Boolean).join('\n')
+
+  return text.includes('PartialReadError') && text.includes('packet_world_particles')
+}
+
 function attachEventLogging (bot, options = {}) {
   const joinWorld = options.joinSurvivalWorld || joinSurvivalWorld
+  const loginServer = options.loginToServer || loginToServer
   const showViewer = options.startViewer || startViewer
   const wait = options.sleep || sleep
   const debugLog = options.debugLog || createDebugLogger()
@@ -37,7 +48,18 @@ function attachEventLogging (bot, options = {}) {
     })
 
     if (spawnCount === 1) {
-      showViewer(bot)
+      await showViewer(bot)
+
+      try {
+        const sentLogin = await loginServer(bot)
+        if (sentLogin !== false) {
+          console.log('Sent server login command')
+          debugLog('command.sent', { command: '/login ***' })
+        }
+      } catch (err) {
+        console.log('Could not send server login command:', err.message)
+        debugLog('command.error', { command: '/login ***', error: err.message })
+      }
 
       try {
         await joinWorld(bot)
@@ -81,6 +103,11 @@ function attachEventLogging (bot, options = {}) {
   })
 
   bot.on('error', (err) => {
+    if (isIgnorableParticleDecodeError(err)) {
+      debugLog('protocol.particleDecodeIgnored', { message: err.message })
+      return
+    }
+
     console.log('Bot error:', err)
     debugLog('error', { message: err.message, stack: err.stack })
   })
@@ -89,5 +116,6 @@ function attachEventLogging (bot, options = {}) {
 }
 
 module.exports = {
-  attachEventLogging
+  attachEventLogging,
+  isIgnorableParticleDecodeError
 }

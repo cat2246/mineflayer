@@ -26,6 +26,7 @@
     "canvas": "^3.2.3",
     "minecraft-data": "^3.108.0",
     "minecraft-protocol": "^1.66.0",
+    "mineflayer-pathfinder": "^2.4.5",
     "mojangson": "^2.0.4",
     "prismarine-biome": "^1.1.1",
     "prismarine-block": "^1.22.0",

@@ -1,17 +1,56 @@
 const path = require('path')
 const readline = require('readline')
+const { createAutomationManager } = require('./automations')
 const { DEBUG_LOG_PATH } = require('./config')
 const { openHomesMenu, teleportHome } = require('./homes')
+
+function parseMessageCommand (command) {
+  if (command.toLowerCase() === '/message') return ''
+
+  const match = command.match(/^\/message\s+(.+)$/i)
+  return match ? match[1] : null
+}
 
 function createCommandConsole (bot, options = {}) {
   const output = options.output || console.log
   const debugLog = options.debugLog || (() => {})
+  const automationManager = options.automationManager || createAutomationManager(bot, { output, debugLog })
   let pendingHomes = null
+  let pendingAutomation = false
 
   async function handleLine (line) {
     const command = line.trim()
     if (!command) return
     debugLog('console.line', { command })
+
+    if (command.toLowerCase() === 'cancel') {
+      pendingHomes = null
+      pendingAutomation = false
+      output('Cancelled.')
+      return
+    }
+
+    const message = parseMessageCommand(command)
+    if (message !== null) {
+      if (!message) {
+        output('Usage: /message <message-or-command>')
+        return
+      }
+
+      bot.chat(message)
+      return
+    }
+
+    if (pendingAutomation) {
+      const choice = Number.parseInt(command, 10)
+      if (!Number.isInteger(choice)) {
+        output('Choose a valid automation number, or type cancel.')
+        return
+      }
+      const started = await automationManager.startByIndex(choice - 1)
+      if (started !== false) pendingAutomation = false
+      return
+    }
 
     if (pendingHomes) {
       const choice = Number.parseInt(command, 10)
@@ -26,14 +65,30 @@ function createCommandConsole (bot, options = {}) {
       return
     }
 
-    if (command.toLowerCase() === 'cancel') {
-      pendingHomes = null
-      output('Cancelled.')
+    if (command.toLowerCase() === 'quit' || command.toLowerCase() === 'exit') {
+      bot.quit()
       return
     }
 
-    if (command.toLowerCase() === 'quit' || command.toLowerCase() === 'exit') {
-      bot.quit()
+    if (command.toLowerCase() === '/automation stop' || command.toLowerCase() === '/automations stop') {
+      const stopped = automationManager.stopActive()
+      output(stopped ? 'Stopped automation.' : 'No automation is running.')
+      return
+    }
+
+    if (command.toLowerCase() === '/automation' || command.toLowerCase() === '/automations') {
+      const automations = automationManager.list()
+      if (automations.length === 0) {
+        output('No automations are available.')
+        return
+      }
+
+      pendingAutomation = true
+      output('Automations:')
+      automations.forEach((automation, index) => {
+        output(`${index + 1}. ${automation.name}`)
+      })
+      output('Type a number to start, or cancel.')
       return
     }
 
@@ -66,7 +121,7 @@ function startConsole (bot, options = {}) {
   const output = options.outputStream || process.stdout
   const rl = readline.createInterface({ input, output })
 
-  console.log('Terminal control ready. Type /home to choose a home, any /command to send it, or quit to disconnect.')
+  console.log('Terminal control ready. Type /home to choose a home, /message <text-or-command> to chat, or quit to disconnect.')
   rl.on('line', line => {
     commandConsole.handleLine(line).catch(err => {
       console.log('Command error:', err.message)
@@ -79,5 +134,6 @@ function startConsole (bot, options = {}) {
 
 module.exports = {
   createCommandConsole,
+  parseMessageCommand,
   startConsole
 }

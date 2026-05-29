@@ -2,52 +2,104 @@ const path = require('path')
 
 const DEFAULT_HOST = 'play.holocraft.xyz'
 const DEFAULT_PORT = 25565
-const DEFAULT_USERNAME = 'limwilson2013@gmail.com'
+const DEFAULT_USERNAME = 'PokiMoki82719'
+const DEFAULT_AUTH = 'offline'
 const DEFAULT_BOT_VERSION = '1.21.10'
 const VIEWER_PORT = 3007
+const SERVER_LOGIN_DELAY_MS = 1000
+const DEFAULT_SERVER_LOGIN_COMMAND = '/login PqOwIeUr0192'
 const SURVIVAL_COMMAND_DELAY_MS = 5000
 const PHYSICS_ENABLE_DELAY_MS = 10000
 const WINDOW_OPEN_TIMEOUT_MS = 10000
+const RESPAWN_CLICK_DELAY_MS = 1000
+const RESPAWN_HOME_DELAY_MS = 5000
+const COMBAT_CHECK_INTERVAL_MS = 1000
+const COMBAT_TARGET_RANGE = 16
+const COMBAT_BOW_DISTANCE = 5
+const COMBAT_BOW_DRAW_MS = 800
+const COMBAT_FLEE_MS = 1000
+const WOODCUTTING_HOME_COMMAND = '/home home'
+const WOODCUTTING_TREE_SEARCH_RADIUS = 64
+const WOODCUTTING_CHEST_SEARCH_RADIUS = 8
+const WOODCUTTING_EMPTY_SLOT_THRESHOLD = 3
+const WOODCUTTING_LOOP_DELAY_MS = 1000
+const WOODCUTTING_HOME_WAIT_MS = 5000
+const WOODCUTTING_ROAM_RADIUS = 20
+const WOODCUTTING_PATH_TIMEOUT_MS = 15000
+const WOODCUTTING_LOG_CANDIDATE_COUNT = 256
+const WOODCUTTING_ACTION_DELAY_MS = 750
+const WOODCUTTING_POST_DIG_DELAY_MS = 1500
 const DEBUG_LOG_PATH = path.join(__dirname, '..', 'logs', 'bot-debug.log')
 
 function buildBotOptions (argv = process.argv, env = process.env) {
   const username = env.MINECRAFT_USERNAME || argv[2] || DEFAULT_USERNAME
   const version = env.MINECRAFT_VERSION || argv[3] || DEFAULT_BOT_VERSION
+  const auth = env.MINECRAFT_AUTH || DEFAULT_AUTH
 
   if (!username) {
-    throw new Error('Missing Microsoft account identifier. Set MINECRAFT_USERNAME or pass it as the first argument.')
+    throw new Error('Missing Minecraft username. Set MINECRAFT_USERNAME or pass it as the first argument.')
   }
 
   return {
     host: DEFAULT_HOST,
     port: DEFAULT_PORT,
     username,
-    auth: 'microsoft',
+    auth,
     version,
     physicsEnabled: false,
-    hideErrors: false,
+    hideErrors: true,
+    logErrors: false,
     checkTimeoutInterval: 30000,
-    closeTimeout: 120000
+    closeTimeout: 120000,
+    respawn: false
   }
+}
+
+function buildServerLoginCommand (env = process.env) {
+  if (env.SERVER_LOGIN_COMMAND) return env.SERVER_LOGIN_COMMAND
+  if (env.SERVER_LOGIN_PASSWORD) return `/login ${env.SERVER_LOGIN_PASSWORD}`
+  return DEFAULT_SERVER_LOGIN_COMMAND
 }
 
 function buildViewerOptions () {
   return {
     port: VIEWER_PORT,
-    firstPerson: true
+    firstPerson: false
   }
 }
 
 module.exports = {
   DEBUG_LOG_PATH,
+  COMBAT_BOW_DISTANCE,
+  COMBAT_BOW_DRAW_MS,
+  COMBAT_CHECK_INTERVAL_MS,
+  COMBAT_FLEE_MS,
+  COMBAT_TARGET_RANGE,
+  DEFAULT_AUTH,
   DEFAULT_BOT_VERSION,
   DEFAULT_HOST,
   DEFAULT_PORT,
+  DEFAULT_SERVER_LOGIN_COMMAND,
   DEFAULT_USERNAME,
   PHYSICS_ENABLE_DELAY_MS,
+  RESPAWN_CLICK_DELAY_MS,
+  RESPAWN_HOME_DELAY_MS,
+  SERVER_LOGIN_DELAY_MS,
   SURVIVAL_COMMAND_DELAY_MS,
   VIEWER_PORT,
   WINDOW_OPEN_TIMEOUT_MS,
+  WOODCUTTING_CHEST_SEARCH_RADIUS,
+  WOODCUTTING_ACTION_DELAY_MS,
+  WOODCUTTING_EMPTY_SLOT_THRESHOLD,
+  WOODCUTTING_HOME_COMMAND,
+  WOODCUTTING_HOME_WAIT_MS,
+  WOODCUTTING_LOOP_DELAY_MS,
+  WOODCUTTING_LOG_CANDIDATE_COUNT,
+  WOODCUTTING_PATH_TIMEOUT_MS,
+  WOODCUTTING_POST_DIG_DELAY_MS,
+  WOODCUTTING_ROAM_RADIUS,
+  WOODCUTTING_TREE_SEARCH_RADIUS,
   buildBotOptions,
+  buildServerLoginCommand,
   buildViewerOptions
 }

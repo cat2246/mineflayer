@@ -1,8 +1,21 @@
 const mineflayer = require('mineflayer')
+const { pathfinder, Movements } = require('mineflayer-pathfinder')
 const { buildBotOptions } = require('./config')
+const { attachCombat } = require('./combat')
 const { startConsole } = require('./commandConsole')
 const { createDebugLogger } = require('./debugLogger')
+const { attachDeathRecovery } = require('./deathRecovery')
 const { attachEventLogging } = require('./eventLogging')
+const { closeViewer } = require('./viewer')
+
+function configureConservativeMovements (movements) {
+  movements.canDig = false
+  movements.allowSprinting = false
+  movements.allowParkour = false
+  movements.allow1by1towers = false
+  movements.maxDropDown = 2
+  return movements
+}
 
 function attachShutdownHandlers (bot, signals = ['SIGINT', 'SIGTERM']) {
   let shuttingDown = false
@@ -10,6 +23,7 @@ function attachShutdownHandlers (bot, signals = ['SIGINT', 'SIGTERM']) {
   function shutdown () {
     if (shuttingDown) return
     shuttingDown = true
+    closeViewer(bot)
     bot.quit()
   }
 
@@ -26,8 +40,16 @@ function createBot (options = buildBotOptions()) {
     username: options.username,
     version: options.version
   })
-  const bot = attachEventLogging(mineflayer.createBot(options), { debugLog })
+  const rawBot = mineflayer.createBot(options)
+  rawBot.loadPlugin(pathfinder)
+  const bot = attachEventLogging(rawBot, { debugLog })
+  bot.once('spawn', () => {
+    const movements = configureConservativeMovements(new Movements(bot))
+    bot.pathfinder.setMovements(movements)
+  })
+  attachDeathRecovery(bot, { debugLog })
   startConsole(bot, { debugLog })
+  attachCombat(bot, { debugLog })
   attachShutdownHandlers(bot)
   return bot
 }
@@ -45,6 +67,7 @@ function start () {
 
 module.exports = {
   attachShutdownHandlers,
+  configureConservativeMovements,
   createBot,
   start
 }

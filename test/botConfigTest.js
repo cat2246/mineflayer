@@ -6,21 +6,23 @@ const EventEmitter = require('events')
 describe('holocraft bot config', function () {
   this.timeout(10000)
 
-  it('uses the Holocraft server with Microsoft auth', () => {
+  it('uses the Holocraft server with offline auth', () => {
     const { buildBotOptions } = require('../bot')
 
-    const options = buildBotOptions(['node', 'bot.js', 'PlayerEmail@example.com'], {})
+    const options = buildBotOptions(['node', 'bot.js'], {})
 
     assert.deepStrictEqual(options, {
       host: 'play.holocraft.xyz',
       port: 25565,
-      username: 'PlayerEmail@example.com',
-      auth: 'microsoft',
+      username: 'PokiMoki82719',
+      auth: 'offline',
       version: '1.21.10',
       physicsEnabled: false,
-      hideErrors: false,
+      hideErrors: true,
+      logErrors: false,
       checkTimeoutInterval: 30000,
-      closeTimeout: 120000
+      closeTimeout: 120000,
+      respawn: false
     })
   })
 
@@ -45,6 +47,17 @@ describe('holocraft bot config', function () {
     assert.strictEqual(options.username, 'env@example.com')
   })
 
+  it('allows overriding Minecraft auth mode from the environment', () => {
+    const { buildBotOptions } = require('../bot')
+
+    const options = buildBotOptions(['node', 'bot.js'], {
+      MINECRAFT_USERNAME: 'premium@example.com',
+      MINECRAFT_AUTH: 'microsoft'
+    })
+
+    assert.strictEqual(options.auth, 'microsoft')
+  })
+
   it('uses the configured default account when no override is provided', () => {
     const { buildBotOptions } = require('../bot')
     const options = buildBotOptions(['node', 'bot.js'], {})
@@ -53,18 +66,40 @@ describe('holocraft bot config', function () {
     assert.ok(options.username.length > 0)
   })
 
-  it('uses first-person viewer defaults on port 3007', () => {
+  it('uses third-person viewer defaults on port 3007', () => {
     const { buildViewerOptions } = require('../bot')
 
     assert.deepStrictEqual(buildViewerOptions(), {
       port: 3007,
-      firstPerson: true
+      firstPerson: false
     })
+  })
+
+  it('configures conservative pathfinder movements', () => {
+    const { configureConservativeMovements } = require('../bot')
+    const movements = {
+      canDig: true,
+      allowSprinting: true,
+      allowParkour: true,
+      allow1by1towers: true,
+      maxDropDown: 4
+    }
+
+    assert.strictEqual(configureConservativeMovements(movements), movements)
+    assert.strictEqual(movements.canDig, false)
+    assert.strictEqual(movements.allowSprinting, false)
+    assert.strictEqual(movements.allowParkour, false)
+    assert.strictEqual(movements.allow1by1towers, false)
+    assert.strictEqual(movements.maxDropDown, 2)
   })
 
   it('disconnects the bot when the process receives a shutdown signal', () => {
     const { attachShutdownHandlers } = require('../bot')
-    const bot = { quitCalls: 0, quit: () => { bot.quitCalls++ } }
+    const bot = {
+      quitCalls: 0,
+      viewer: { closeCalls: 0, close: () => { bot.viewer.closeCalls++ } },
+      quit: () => { bot.quitCalls++ }
+    }
     const signals = ['bot-test-shutdown']
 
     attachShutdownHandlers(bot, signals)
@@ -72,25 +107,62 @@ describe('holocraft bot config', function () {
     process.emit('bot-test-shutdown')
 
     assert.strictEqual(bot.quitCalls, 1)
+    assert.strictEqual(bot.viewer.closeCalls, 1)
   })
 
-  it('starts prismarine-viewer with the bot and viewer options', () => {
+  it('starts prismarine-viewer with the bot and viewer options', async () => {
     const { startViewer } = require('../bot')
     const calls = []
     const bot = {}
 
-    startViewer(bot, (viewerBot, options) => {
+    const viewer = await startViewer(bot, (viewerBot, options) => {
       calls.push({ viewerBot, options })
-      return 'viewer'
+      bot.viewer = 'viewer'
+    }, {
+      port: 3007,
+      firstPerson: false,
+      isPortAvailable: async () => true
     })
 
     assert.deepStrictEqual(calls, [{
       viewerBot: bot,
       options: {
         port: 3007,
-        firstPerson: true
+        firstPerson: false
       }
     }])
+    assert.strictEqual(viewer, 'viewer')
+  })
+
+  it('skips prismarine-viewer when the viewer port is already in use', async () => {
+    const { startViewer } = require('../bot')
+    const calls = []
+
+    const viewer = await startViewer({}, () => {
+      calls.push('start')
+    }, {
+      port: 3007,
+      firstPerson: false,
+      isPortAvailable: async () => false
+    })
+
+    assert.strictEqual(viewer, null)
+    assert.deepStrictEqual(calls, [])
+  })
+
+  it('closes prismarine-viewer only once', () => {
+    const { closeViewer } = require('../bot')
+    const bot = {
+      viewer: {
+        closeCalls: 0,
+        close: () => { bot.viewer.closeCalls++ }
+      }
+    }
+
+    closeViewer(bot)
+    closeViewer(bot)
+
+    assert.strictEqual(bot.viewer.closeCalls, 1)
   })
 
   it('loads the real prismarine-viewer mineflayer integration', function () {
@@ -118,12 +190,31 @@ describe('holocraft bot config', function () {
     assert.deepStrictEqual(messages, ['/survival'])
   })
 
-  it('joins Survival on spawn after starting the viewer', async () => {
+  it('sends the Holocraft login command after spawn', async () => {
+    const { loginToServer } = require('../bot')
+    const sleeps = []
+    const messages = []
+    const bot = {
+      chat: (message) => {
+        messages.push(message)
+      }
+    }
+
+    await loginToServer(bot, {
+      sleep: async (ms) => sleeps.push(ms)
+    })
+
+    assert.deepStrictEqual(sleeps, [1000])
+    assert.deepStrictEqual(messages, ['/login PqOwIeUr0192'])
+  })
+
+  it('logs into the server and joins Survival on spawn after starting the viewer', async () => {
     const { attachEventLogging } = require('../bot')
     const bot = new EventEmitter()
     const events = []
 
     attachEventLogging(bot, {
+      loginToServer: async () => events.push('loginToServer'),
       joinSurvivalWorld: async () => events.push('joinSurvivalWorld'),
       startViewer: () => events.push('startViewer')
     })
@@ -131,7 +222,7 @@ describe('holocraft bot config', function () {
     bot.emit('spawn')
     await new Promise(resolve => setImmediate(resolve))
 
-    assert.deepStrictEqual(events, ['startViewer', 'joinSurvivalWorld'])
+    assert.deepStrictEqual(events, ['startViewer', 'loginToServer', 'joinSurvivalWorld'])
   })
 
   it('keeps physics disabled on the lobby spawn', async () => {
@@ -188,6 +279,593 @@ describe('holocraft bot config', function () {
     bot.emit('resourcePack', 'https://example.com/pack.zip', 'hash')
 
     assert.strictEqual(accepted, 1)
+  })
+
+  it('recognizes noisy particle partial-read protocol errors', () => {
+    const { isIgnorableParticleDecodeError } = require('../bot')
+    const particleError = new Error('PartialReadError: Read error for undefined : undefined')
+    particleError.stack = [
+      'PartialReadError: Read error for undefined : undefined',
+      'at Object.packet_world_particles',
+      'at CompiledProtodef.read'
+    ].join('\n')
+
+    assert.strictEqual(isIgnorableParticleDecodeError(particleError), true)
+    assert.strictEqual(isIgnorableParticleDecodeError(new Error('client timed out')), false)
+  })
+
+  it('recognizes hostile mobs without targeting passive mobs or players', () => {
+    const { isHostileMob } = require('../bot')
+
+    assert.strictEqual(isHostileMob({ type: 'mob', name: 'zombie' }), true)
+    assert.strictEqual(isHostileMob({ type: 'mob', name: 'cow' }), false)
+    assert.strictEqual(isHostileMob({ type: 'player', name: 'Steve' }), false)
+  })
+
+  it('uses a sword for nearby hostile mobs', () => {
+    const { chooseCombatAction } = require('../bot')
+    const bot = combatBot([
+      { name: 'diamond_sword' },
+      { name: 'bow' },
+      { name: 'arrow' }
+    ])
+    const target = combatTarget('zombie', 3)
+
+    const action = chooseCombatAction(bot, target)
+
+    assert.strictEqual(action.type, 'sword')
+    assert.strictEqual(action.weapon.name, 'diamond_sword')
+  })
+
+  it('uses a bow for far or ranged hostile mobs', () => {
+    const { chooseCombatAction } = require('../bot')
+    const bot = combatBot([
+      { name: 'diamond_sword' },
+      { name: 'bow' },
+      { name: 'arrow' }
+    ])
+
+    assert.strictEqual(chooseCombatAction(bot, combatTarget('zombie', 6)).type, 'bow')
+    assert.strictEqual(chooseCombatAction(bot, combatTarget('skeleton', 3)).type, 'bow')
+  })
+
+  it('uses a sword fallback for far non-ranged mobs when no bow is available', () => {
+    const { chooseCombatAction } = require('../bot')
+    const bot = combatBot([{ name: 'diamond_sword' }])
+
+    const action = chooseCombatAction(bot, combatTarget('zombie', 6))
+
+    assert.strictEqual(action.type, 'sword')
+    assert.strictEqual(action.weapon.name, 'diamond_sword')
+  })
+
+  it('runs away when no suitable combat weapon is available', () => {
+    const { chooseCombatAction } = require('../bot')
+    const bot = combatBot([])
+
+    const action = chooseCombatAction(bot, combatTarget('zombie', 3))
+
+    assert.strictEqual(action.type, 'flee')
+  })
+
+  it('performs sword combat against a nearby hostile mob', async () => {
+    const { runCombatTick } = require('../bot')
+    const events = []
+    const target = combatTarget('zombie', 3)
+    const bot = combatBot([{ name: 'diamond_sword' }], events)
+
+    await runCombatTick(bot, {
+      targetFinder: () => target,
+      debugLog: () => {}
+    })
+
+    assert.deepStrictEqual(events, [
+      ['pathfinderStop'],
+      ['equip', 'diamond_sword', 'hand'],
+      ['lookAt'],
+      ['attack', 'zombie']
+    ])
+  })
+
+  it('performs bow combat against a far hostile mob', async () => {
+    const { runCombatTick } = require('../bot')
+    const events = []
+    const target = combatTarget('zombie', 6)
+    const bot = combatBot([{ name: 'bow' }, { name: 'arrow' }], events)
+
+    await runCombatTick(bot, {
+      targetFinder: () => target,
+      sleep: async () => {},
+      debugLog: () => {}
+    })
+
+    assert.deepStrictEqual(events, [
+      ['pathfinderStop'],
+      ['equip', 'bow', 'hand'],
+      ['lookAt'],
+      ['activateItem'],
+      ['deactivateItem']
+    ])
+  })
+
+  it('tries to flee from a hostile mob when unarmed', async () => {
+    const { runCombatTick } = require('../bot')
+    const events = []
+    const target = combatTarget('zombie', 3)
+    const bot = combatBot([], events)
+
+    await runCombatTick(bot, {
+      targetFinder: () => target,
+      sleep: async () => {},
+      debugLog: () => {}
+    })
+
+    assert.deepStrictEqual(events, [
+      ['pathfinderStop'],
+      ['lookAt'],
+      ['control', 'back', true],
+      ['control', 'jump', true],
+      ['control', 'back', false],
+      ['control', 'jump', false]
+    ])
+  })
+
+  it('lists wood cutting from the automation menu and starts the selected automation', async () => {
+    const { createCommandConsole } = require('../bot')
+    const output = []
+    const events = []
+    const bot = new EventEmitter()
+
+    const consoleController = createCommandConsole(bot, {
+      output: message => output.push(message),
+      automationManager: {
+        list: () => [{ name: 'Wood cutting' }],
+        startByIndex: async index => events.push(['startAutomation', index])
+      }
+    })
+
+    await consoleController.handleLine('/automation')
+    await consoleController.handleLine('1')
+
+    assert(output.some(message => message.includes('1. Wood cutting')))
+    assert.deepStrictEqual(events, [['startAutomation', 0]])
+  })
+
+  it('stops the active automation from the terminal', async () => {
+    const { createCommandConsole } = require('../bot')
+    const output = []
+    const events = []
+    const bot = new EventEmitter()
+
+    const consoleController = createCommandConsole(bot, {
+      output: message => output.push(message),
+      automationManager: {
+        list: () => [{ name: 'Wood cutting' }],
+        startByIndex: async index => events.push(['startAutomation', index]),
+        stopActive: () => {
+          events.push(['stopAutomation'])
+          return true
+        }
+      }
+    })
+
+    await consoleController.handleLine('/automation')
+    await consoleController.handleLine('1')
+    await consoleController.handleLine('/automation stop')
+
+    assert(output.some(message => message.includes('Stopped automation.')))
+    assert.deepStrictEqual(events, [
+      ['startAutomation', 0],
+      ['stopAutomation']
+    ])
+  })
+
+  it('stops the active automation when the bot is kicked', async () => {
+    const { createAutomationManager } = require('../bot')
+    const events = []
+    const bot = new EventEmitter()
+    const automationManager = createAutomationManager(bot, {
+      output: () => {},
+      debugLog: () => {},
+      automations: [
+        {
+          name: 'Wood cutting',
+          start: () => ({
+            stop: () => events.push(['stop'])
+          })
+        }
+      ]
+    })
+
+    await automationManager.startByIndex(0)
+    bot.emit('kicked', '[Vulcan] Unfair Advantage')
+
+    assert.deepStrictEqual(events, [['stop']])
+  })
+
+  it('sends /message content directly to Minecraft chat', async () => {
+    const { createCommandConsole } = require('../bot')
+    const events = []
+    const output = []
+    const bot = new EventEmitter()
+    bot.chat = message => events.push(['chat', message])
+
+    const consoleController = createCommandConsole(bot, {
+      output: message => output.push(message),
+      automationManager: {
+        list: () => {
+          throw new Error('local automation menu should not open')
+        }
+      }
+    })
+
+    await consoleController.handleLine('/message /automation')
+    await consoleController.handleLine('/message Hello')
+
+    assert.deepStrictEqual(events, [
+      ['chat', '/automation'],
+      ['chat', 'Hello']
+    ])
+    assert.deepStrictEqual(output, [])
+  })
+
+  it('shows usage when /message has no content', async () => {
+    const { createCommandConsole } = require('../bot')
+    const output = []
+    const events = []
+    const bot = new EventEmitter()
+    bot.chat = message => events.push(['chat', message])
+
+    const consoleController = createCommandConsole(bot, {
+      output: message => output.push(message)
+    })
+
+    await consoleController.handleLine('/message')
+
+    assert.deepStrictEqual(events, [])
+    assert(output.some(message => message.includes('Usage: /message <message-or-command>')))
+  })
+
+  it('detects natural tree logs only when leaves are nearby', () => {
+    const { isNaturalTreeLog } = require('../bot')
+    const treeLog = block('oak_log', 0, 64, 0)
+    const houseLog = block('oak_log', 10, 64, 10)
+    const decoratedHouseLog = block('oak_log', 20, 64, 20)
+    const bot = blockBot([
+      treeLog,
+      houseLog,
+      decoratedHouseLog,
+      block('oak_leaves', 1, 66, 0),
+      block('oak_leaves', 20, 66, 20),
+      block('oak_planks', 21, 64, 20)
+    ])
+
+    assert.strictEqual(isNaturalTreeLog(bot, treeLog), true)
+    assert.strictEqual(isNaturalTreeLog(bot, houseLog), false)
+    assert.strictEqual(isNaturalTreeLog(bot, decoratedHouseLog), false)
+  })
+
+  it('does not crash when the block scanner passes null candidates', () => {
+    const { isNaturalTreeLog } = require('../bot')
+
+    assert.strictEqual(isNaturalTreeLog(blockBot(), null), false)
+    assert.strictEqual(isNaturalTreeLog(blockBot(), { name: 'oak_log', position: null }), false)
+  })
+
+  it('knows when the inventory is almost full', () => {
+    const { isInventoryAlmostFull } = require('../bot')
+
+    assert.strictEqual(isInventoryAlmostFull({ inventory: { emptySlotCount: () => 3 } }), true)
+    assert.strictEqual(isInventoryAlmostFull({ inventory: { emptySlotCount: () => 4 } }), false)
+  })
+
+  it('cuts a nearby natural tree log', async () => {
+    const { cutTreeLog } = require('../bot')
+    const events = []
+    const treeLog = block('oak_log', 0, 64, 0)
+    const bot = blockBot([
+      treeLog,
+      block('oak_leaves', 1, 66, 0)
+    ], events)
+    bot.inventory.items = () => [{ name: 'iron_axe' }]
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+    }
+
+    await cutTreeLog(bot, treeLog, {
+      debugLog: () => {},
+      sleep: async () => {}
+    })
+
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalGetToBlock', 0, 64, 0],
+      ['equip', 'iron_axe', 'hand'],
+      ['dig', 'oak_log']
+    ])
+  })
+
+  it('normalizes non-array tool enchant data before digging a tree log', async () => {
+    const { cutTreeLog } = require('../bot')
+    const events = []
+    const treeLog = block('oak_log', 0, 64, 0)
+    const weirdAxe = { name: 'iron_axe', enchants: { levels: [] } }
+    const bot = blockBot([
+      treeLog,
+      block('oak_leaves', 1, 66, 0)
+    ], events)
+    bot.inventory.items = () => [weirdAxe]
+    bot.pathfinder = {
+      bestHarvestTool: () => weirdAxe,
+      goto: async () => {}
+    }
+    bot.equip = async (item, destination) => {
+      bot.heldItem = item
+      events.push(['equip', item.name, destination])
+    }
+    bot.dig = async target => {
+      assert(Array.isArray(bot.heldItem.enchants))
+      events.push(['dig', target.name])
+    }
+
+    await cutTreeLog(bot, treeLog, {
+      debugLog: () => {},
+      sleep: async () => {}
+    })
+
+    assert.deepStrictEqual(events, [
+      ['equip', 'iron_axe', 'hand'],
+      ['dig', 'oak_log']
+    ])
+  })
+
+  it('clears the offhand before digging a tree log', async () => {
+    const { cutTreeLog } = require('../bot')
+    const events = []
+    const treeLog = block('oak_log', 0, 64, 0)
+    const bot = blockBot([
+      treeLog,
+      block('oak_leaves', 1, 66, 0)
+    ], events)
+    bot.inventory.slots = []
+    bot.inventory.slots[45] = { name: 'torch' }
+    bot.getEquipmentDestSlot = destination => ({ hand: 36, head: 5, 'off-hand': 45 })[destination]
+    bot.unequip = async destination => {
+      events.push(['unequip', destination])
+      bot.inventory.slots[45] = null
+    }
+    bot.pathfinder = {
+      goto: async () => {}
+    }
+
+    await cutTreeLog(bot, treeLog, {
+      debugLog: () => {},
+      sleep: async () => {}
+    })
+
+    assert.deepStrictEqual(events, [
+      ['unequip', 'off-hand'],
+      ['dig', 'oak_log']
+    ])
+    assert.strictEqual(bot.inventory.slots[45], null)
+  })
+
+  it('looks at the log and pauses before digging', async () => {
+    const { cutTreeLog } = require('../bot')
+    const events = []
+    const treeLog = block('oak_log', 0, 64, 0)
+    const bot = blockBot([
+      treeLog,
+      block('oak_leaves', 1, 66, 0)
+    ], events)
+    bot.pathfinder = {
+      goto: async () => {}
+    }
+    bot.setControlState = (control, state) => events.push(['control', control, state])
+    bot.lookAt = async (position, force) => events.push(['lookAt', position.x, position.y, position.z, force])
+
+    await cutTreeLog(bot, treeLog, {
+      debugLog: () => {},
+      sleep: async ms => events.push(['sleep', ms])
+    })
+
+    assert.deepStrictEqual(events, [
+      ['control', 'sprint', false],
+      ['control', 'jump', false],
+      ['lookAt', 0.5, 64.5, 0.5, true],
+      ['sleep', 750],
+      ['dig', 'oak_log'],
+      ['sleep', 1500]
+    ])
+  })
+
+  it('sanitizes component enchant data during wood cutting dig time', async () => {
+    const { cutTreeLog } = require('../bot')
+    const events = []
+    const treeLog = block('oak_log', 0, 64, 0)
+    treeLog.digTime = (type, creative, inWater, notOnGround, enchantments) => {
+      events.push(['digTime', enchantments])
+      assert(Array.isArray(enchantments))
+      return 100
+    }
+
+    const bot = blockBot([
+      treeLog,
+      block('oak_leaves', 1, 66, 0)
+    ], events)
+    const axe = {
+      name: 'netherite_axe',
+      type: 999,
+      get enchants () {
+        return { custom: true }
+      },
+      set enchants (value) {}
+    }
+    bot.heldItem = axe
+    bot.game = { gameMode: 'survival' }
+    bot.entity.onGround = true
+    bot.entity.effects = {}
+    bot._getBlockAtEyeLevel = () => null
+    bot.pathfinder = {
+      bestHarvestTool: () => axe,
+      goto: async () => {}
+    }
+    bot.equip = async (item, destination) => {
+      events.push(['equip', item.name, destination])
+      bot.heldItem = item
+    }
+    bot.digTime = () => {
+      throw new TypeError('enchantments is not iterable')
+    }
+    bot.dig = async target => {
+      bot.digTime(target)
+      events.push(['dig', target.name])
+    }
+
+    await cutTreeLog(bot, treeLog, {
+      debugLog: () => {},
+      sleep: async () => {}
+    })
+
+    assert.deepStrictEqual(events, [
+      ['equip', 'netherite_axe', 'hand'],
+      ['digTime', []],
+      ['dig', 'oak_log']
+    ])
+  })
+
+  it('roams when no natural tree is nearby', async () => {
+    const { runWoodCuttingCycle } = require('../bot')
+    const events = []
+    const bot = blockBot([], events)
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+    }
+
+    await runWoodCuttingCycle(bot, {
+      debugLog: () => {},
+      roamTarget: combatPosition(8, 64, 0)
+    })
+
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalNearXZ', 8, undefined, 0]
+    ])
+  })
+
+  it('logs the wood cutting path timeout target context', async () => {
+    const { roamForTrees } = require('../bot')
+    const entries = []
+    const bot = blockBot([])
+    bot.pathfinder = {
+      goto: () => new Promise(() => {}),
+      setGoal: goal => entries.push({ event: 'setGoal', data: goal })
+    }
+
+    const roamed = await roamForTrees(bot, {
+      debugLog: (event, data) => entries.push({ event, data }),
+      pathTimeoutMs: 1,
+      roamTarget: combatPosition(8, 64, 0)
+    })
+
+    assert.strictEqual(roamed, false)
+    assert(entries.some(entry => entry.event === 'setGoal' && entry.data === null))
+    assert(entries.some(entry =>
+      entry.event === 'automation.woodcutting.pathTimeout' &&
+      entry.data.mode === 'roam' &&
+      entry.data.target.x === 8 &&
+      entry.data.target.z === 0
+    ))
+  })
+
+  it('stops pathfinding when the wood cutting automation is stopped', () => {
+    const { startWoodCuttingAutomation } = require('../bot')
+    const events = []
+    const bot = blockBot([], events)
+    bot._ended = true
+    bot.pathfinder = {
+      setGoal: goal => events.push(['setGoal', goal])
+    }
+
+    const automation = startWoodCuttingAutomation(bot, {
+      sleep: async () => {},
+      debugLog: () => {},
+      output: () => {}
+    })
+
+    automation.stop()
+
+    assert.deepStrictEqual(events, [['setGoal', null]])
+  })
+
+  it('enables physics before starting wood cutting movement', async () => {
+    const { startWoodCuttingAutomation } = require('../bot')
+    const entries = []
+    const bot = blockBot([])
+    bot._ended = true
+    bot.physicsEnabled = false
+
+    startWoodCuttingAutomation(bot, {
+      sleep: async () => {},
+      debugLog: (event, data) => entries.push({ event, data }),
+      output: () => {}
+    })
+
+    assert.strictEqual(bot.physicsEnabled, true)
+    assert(entries.some(entry => entry.event === 'automation.woodcutting.physicsEnabled'))
+  })
+
+  it('teleports home and deposits wood items into a nearby chest', async () => {
+    const { depositWoodAtHome } = require('../bot')
+    const events = []
+    const chestBlock = block('chest', 1, 64, 0)
+    const oakLog = { name: 'oak_log', type: 17, count: 12 }
+    const stick = { name: 'stick', type: 280, count: 2 }
+    const chest = {
+      deposit: async (type, metadata, count) => events.push(['deposit', type, count]),
+      close: () => events.push(['close'])
+    }
+    const bot = blockBot([chestBlock], events)
+    bot.inventory.items = () => [oakLog, stick]
+    bot.chat = command => events.push(['chat', command])
+    bot.openContainer = async () => chest
+
+    await depositWoodAtHome(bot, {
+      sleep: async () => {},
+      debugLog: () => {}
+    })
+
+    assert.deepStrictEqual(events, [
+      ['chat', '/home home'],
+      ['deposit', 17, 12],
+      ['close']
+    ])
+  })
+
+  it('manually respawns after death and teleports home after spawning', async () => {
+    const { attachDeathRecovery } = require('../bot')
+    const bot = new EventEmitter()
+    const events = []
+
+    bot.respawn = () => events.push(['respawn'])
+    bot.chat = command => events.push(['chat', command])
+    bot.pathfinder = { setGoal: goal => events.push(['setGoal', goal]) }
+    bot.clearControlStates = () => events.push(['clearControlStates'])
+
+    attachDeathRecovery(bot, {
+      sleep: async () => {},
+      debugLog: () => {}
+    })
+
+    bot.emit('death')
+    await new Promise(resolve => setImmediate(resolve))
+    bot.emit('spawn')
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [
+      ['setGoal', null],
+      ['clearControlStates'],
+      ['respawn'],
+      ['chat', '/home home']
+    ])
   })
 
   it('extracts homes from the homes window', () => {
@@ -429,3 +1107,78 @@ describe('holocraft bot config', function () {
     assert(entries.some(entry => entry.event === 'homes.detected'))
   })
 })
+
+function combatBot (items = [], events = []) {
+  return {
+    entity: {
+      position: combatPosition(0, 0, 0)
+    },
+    inventory: {
+      items: () => items
+    },
+    equip: async (item, destination) => events.push(['equip', item.name, destination]),
+    lookAt: async () => events.push(['lookAt']),
+    attack: target => events.push(['attack', target.name]),
+    activateItem: () => events.push(['activateItem']),
+    deactivateItem: () => events.push(['deactivateItem']),
+    pathfinder: {
+      setGoal: goal => {
+        if (goal === null) events.push(['pathfinderStop'])
+      }
+    },
+    setControlState: (control, state) => events.push(['control', control, state])
+  }
+}
+
+function combatTarget (name, x) {
+  return {
+    type: 'mob',
+    name,
+    height: 1.8,
+    position: combatPosition(x, 0, 0)
+  }
+}
+
+function combatPosition (x, y, z) {
+  return {
+    x,
+    y,
+    z,
+    distanceTo: other => Math.sqrt(
+      Math.pow(x - other.x, 2) +
+      Math.pow(y - other.y, 2) +
+      Math.pow(z - other.z, 2)
+    ),
+    offset: (dx, dy, dz) => combatPosition(x + dx, y + dy, z + dz)
+  }
+}
+
+function blockBot (blocks = [], events = []) {
+  return {
+    entity: {
+      position: combatPosition(0, 64, 0)
+    },
+    inventory: {
+      items: () => [],
+      emptySlotCount: () => 10
+    },
+    findBlocks: ({ matching }) => blocks
+      .filter(candidate => matching(candidate))
+      .map(candidate => candidate.position),
+    blockAt: position => blocks.find(candidate =>
+      candidate.position.x === position.x &&
+      candidate.position.y === position.y &&
+      candidate.position.z === position.z
+    ) || null,
+    equip: async (item, destination) => events.push(['equip', item.name, destination]),
+    dig: async target => events.push(['dig', target.name])
+  }
+}
+
+function block (name, x, y, z) {
+  return {
+    name,
+    type: Math.abs(name.split('').reduce((sum, char) => sum + char.charCodeAt(0), 0)),
+    position: combatPosition(x, y, z)
+  }
+}
