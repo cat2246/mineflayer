@@ -2,6 +2,7 @@ const path = require('path')
 const readline = require('readline')
 const { createAutomationManager } = require('./automations')
 const { DEBUG_LOG_PATH } = require('./config')
+const { createFollowController } = require('./follow')
 const { openHomesMenu, teleportHome } = require('./homes')
 
 function parseMessageCommand (command) {
@@ -15,6 +16,7 @@ function createCommandConsole (bot, options = {}) {
   const output = options.output || console.log
   const debugLog = options.debugLog || (() => {})
   const automationManager = options.automationManager || createAutomationManager(bot, { output, debugLog })
+  const followController = options.followController || createFollowController(bot, { output, debugLog })
   let pendingHomes = null
   let pendingAutomation = false
 
@@ -73,6 +75,51 @@ function createCommandConsole (bot, options = {}) {
     if (command.toLowerCase() === '/automation stop' || command.toLowerCase() === '/automations stop') {
       const stopped = automationManager.stopActive()
       output(stopped ? 'Stopped automation.' : 'No automation is running.')
+      return
+    }
+
+    const followMatch = command.match(/^\/follow\s+(\S+)$/i)
+    if (followMatch) {
+      const result = await followController.followPlayer(followMatch[1])
+      output(result.message)
+      return
+    }
+
+    if (command.toLowerCase() === '/follow') {
+      output('Usage: /follow <player>')
+      return
+    }
+
+    if (command.toLowerCase() === '/unfollow') {
+      const result = followController.unfollow()
+      output(result.message)
+      return
+    }
+
+    if (command.toLowerCase() === '/pickup') {
+      const result = followController.togglePickup()
+      output(result.message)
+      return
+    }
+
+    if (command.toLowerCase() === '/unload inventory') {
+      const result = await followController.unloadInventory()
+      output(result.message)
+      return
+    }
+
+    if (command.toLowerCase() === '/help') {
+      const helpLines = typeof followController.helpLines === 'function'
+        ? followController.helpLines()
+        : [
+            '/follow <player> - follow a player',
+            '/unfollow - stop following',
+            '/pickup - toggle dropped item pickup',
+            '/unload inventory - unload into a nearby chest',
+            '/help - show commands'
+          ]
+      output('Commands:')
+      helpLines.forEach(line => output(line))
       return
     }
 

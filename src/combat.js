@@ -5,6 +5,7 @@ const {
   COMBAT_FLEE_MS,
   COMBAT_TARGET_RANGE
 } = require('./config')
+const { isMovementPaused } = require('./knockbackPause')
 const { sleep } = require('./time')
 
 const COMBAT_BUSY_MS = 3000
@@ -215,8 +216,13 @@ async function performPvpAttack (bot, target, debugLog) {
   const sword = findSword(bot)
   if (sword) await bot.equip(sword, 'hand')
 
+  if (bot.__movementPauseClearedPathfinder && bot.pvp.target === target) {
+    bot.pvp.target = null
+  }
+
   if (bot.pvp.target !== target) {
-    bot.pvp.attack(target)
+    bot.__movementPauseClearedPathfinder = false
+    await bot.pvp.attack(target)
   }
 
   debugLog('combat.attack', {
@@ -245,6 +251,14 @@ async function runCombatTick (bot, options = {}) {
       await bot.pvp.stop()
     }
     return { type: 'none' }
+  }
+
+  if (isMovementPaused(bot, options.now?.() ?? Date.now())) {
+    const action = chooseCombatAction(bot, target, options)
+    if (action.type === 'sword') await performSwordAttack(bot, action, debugLog)
+    if (action.type === 'bow') await performBowAttack(bot, action, options, debugLog)
+    if (action.type === 'flee') return { type: 'paused', target, distance: action.distance }
+    return action
   }
 
   if (typeof bot.pvp?.attack === 'function') {

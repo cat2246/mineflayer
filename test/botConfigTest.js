@@ -78,7 +78,7 @@ describe('holocraft bot config', function () {
     })
   })
 
-  it('configures conservative pathfinder movements', () => {
+  it('configures conservative pathfinder movements without using pathfinder door placement', () => {
     const { configureConservativeMovements } = require('../bot')
     const movements = {
       canDig: true,
@@ -435,6 +435,93 @@ describe('holocraft bot config', function () {
     ])
   })
 
+  it('uses direct counterattack instead of pvp chase during movement pause', async () => {
+    const { runCombatTick } = require('../bot')
+    const events = []
+    const target = combatTarget('zombie', 3)
+    const bot = combatBot([{ name: 'diamond_sword' }], events)
+    bot.__movementPausedUntil = Date.now() + 1000
+    bot.pvp = {
+      target,
+      attack: entity => events.push(['pvpAttack', entity.name])
+    }
+
+    const action = await runCombatTick(bot, {
+      targetFinder: () => target,
+      debugLog: () => {}
+    })
+
+    assert.strictEqual(action.type, 'sword')
+    assert.deepStrictEqual(events, [
+      ['pathfinderStop'],
+      ['equip', 'diamond_sword', 'hand'],
+      ['lookAt'],
+      ['attack', 'zombie']
+    ])
+  })
+
+  it('pauses movement on hurt without stopping the pvp target', () => {
+    const { attachKnockbackPause } = require('../bot')
+    const events = []
+    const now = 1000
+    const target = combatTarget('zombie', 3)
+    const bot = new EventEmitter()
+    bot.entity = { id: 1 }
+    bot.pathfinder = {
+      setGoal: goal => events.push(['setGoal', goal]),
+      stop: () => events.push(['pathfinderStop'])
+    }
+    bot.clearControlStates = () => events.push(['clearControls'])
+    bot.pvp = {
+      target,
+      stop: () => events.push(['pvpStop'])
+    }
+
+    attachKnockbackPause(bot, {
+      now: () => now,
+      pauseMs: 700,
+      debugLog: () => {}
+    })
+    bot.emit('entityHurt', bot.entity, target)
+
+    assert.strictEqual(bot.__movementPausedUntil, 1700)
+    assert.strictEqual(bot.pvp.target, target)
+    assert.deepStrictEqual(events, [
+      ['setGoal', null],
+      ['clearControls']
+    ])
+  })
+
+  it('adds fallback knockback when hurt arrives without server velocity', () => {
+    const { attachKnockbackPause } = require('../bot')
+    const bot = new EventEmitter()
+    bot.entity = {
+      id: 1,
+      position: combatPosition(0, 64, 0),
+      velocity: {
+        x: 0,
+        y: 0,
+        z: 0
+      }
+    }
+    const attacker = {
+      position: combatPosition(1, 64, 0)
+    }
+
+    attachKnockbackPause(bot, {
+      now: () => 1000,
+      pauseMs: 700,
+      horizontalVelocity: 0.45,
+      verticalVelocity: 0.35,
+      debugLog: () => {}
+    })
+    bot.emit('entityHurt', bot.entity, attacker)
+
+    assert(bot.entity.velocity.x < -0.4)
+    assert.strictEqual(bot.entity.velocity.y, 0.35)
+    assert.strictEqual(bot.entity.velocity.z, 0)
+  })
+
   it('does not run combat while night safety is active', async () => {
     const { runCombatTick } = require('../bot')
     const events = []
@@ -722,6 +809,352 @@ describe('holocraft bot config', function () {
 
     assert.deepStrictEqual(events, [])
     assert(output.some(message => message.includes('Usage: /message <message-or-command>')))
+  })
+
+  it('starts and stops following players from the terminal', async () => {
+    const { createCommandConsole } = require('../bot')
+    const output = []
+    const events = []
+    const bot = new EventEmitter()
+    const consoleController = createCommandConsole(bot, {
+      output: message => output.push(message),
+      followController: {
+        followPlayer: async playerName => {
+          events.push(['follow', playerName])
+          return { ok: true, message: `Following ${playerName}.` }
+        },
+        unfollow: () => {
+          events.push(['unfollow'])
+          return { ok: true, message: 'Stopped following.' }
+        }
+      }
+    })
+
+    await consoleController.handleLine('/follow Cat2246')
+    await consoleController.handleLine('/unfollow')
+
+    assert.deepStrictEqual(events, [
+      ['follow', 'Cat2246'],
+      ['unfollow']
+    ])
+    assert(output.some(message => message.includes('Following Cat2246.')))
+    assert(output.some(message => message.includes('Stopped following.')))
+  })
+
+  it('unloads inventory from the terminal and lists helper commands', async () => {
+    const { createCommandConsole } = require('../bot')
+    const output = []
+    const events = []
+    const bot = new EventEmitter()
+    const consoleController = createCommandConsole(bot, {
+      output: message => output.push(message),
+      followController: {
+        unloadInventory: async () => {
+          events.push(['unload'])
+          return { ok: true, message: 'Unloaded inventory.' }
+        },
+        helpLines: () => [
+          '/follow <player> - follow a player',
+          '/unfollow - stop following',
+          '/pickup - toggle dropped item pickup',
+          '/unload inventory - unload into a nearby chest'
+        ]
+      }
+    })
+
+    await consoleController.handleLine('/unload inventory')
+    await consoleController.handleLine('/help')
+
+    assert.deepStrictEqual(events, [['unload']])
+    assert(output.some(message => message.includes('Unloaded inventory.')))
+    assert(output.some(message => message.includes('/follow <player>')))
+    assert(output.some(message => message.includes('/pickup')))
+    assert(output.some(message => message.includes('/unload inventory')))
+  })
+
+  it('toggles dropped item pickup from the terminal', async () => {
+    const { createCommandConsole } = require('../bot')
+    const output = []
+    const events = []
+    const bot = new EventEmitter()
+    const consoleController = createCommandConsole(bot, {
+      output: message => output.push(message),
+      followController: {
+        togglePickup: () => {
+          events.push(['togglePickup'])
+          return { ok: true, enabled: true, message: 'Dropped item pickup enabled.' }
+        }
+      }
+    })
+
+    await consoleController.handleLine('/pickup')
+
+    assert.deepStrictEqual(events, [['togglePickup']])
+    assert(output.some(message => message.includes('Dropped item pickup enabled.')))
+  })
+
+  it('refuses to follow players not in the server', async () => {
+    const { createFollowController } = require('../bot')
+    const events = []
+    const bot = followBot({ players: {} }, events)
+    const controller = createFollowController(bot)
+
+    const result = await controller.followPlayer('Cat2246')
+
+    assert.strictEqual(result.ok, false)
+    assert(result.message.includes('Cat2246 is not in the server'))
+    assert.deepStrictEqual(events, [])
+  })
+
+  it('follows visible players with pathfinder', async () => {
+    const { createFollowController } = require('../bot')
+    const events = []
+    const playerEntity = {
+      username: 'Cat2246',
+      position: combatPosition(5, 64, 0)
+    }
+    const bot = followBot({
+      players: { Cat2246: { entity: playerEntity } }
+    }, events)
+    const controller = createFollowController(bot)
+
+    const result = await controller.followPlayer('Cat2246')
+    await controller.tick()
+
+    assert.strictEqual(result.ok, true)
+    assert.deepStrictEqual(events, [
+      ['setGoal', 'GoalFollow', 'Cat2246', true]
+    ])
+  })
+
+  it('opens a nearby door before following a visible player', async () => {
+    const { createFollowController } = require('../bot')
+    const events = []
+    const playerEntity = {
+      username: 'Cat2246',
+      position: combatPosition(5, 64, 0)
+    }
+    const bot = followBot({
+      players: { Cat2246: { entity: playerEntity } }
+    }, events)
+    const controller = createFollowController(bot, {
+      openNearbyDoor: async () => events.push(['openNearbyDoor'])
+    })
+
+    await controller.followPlayer('Cat2246')
+    await controller.tick()
+
+    assert.deepStrictEqual(events, [
+      ['openNearbyDoor'],
+      ['setGoal', 'GoalFollow', 'Cat2246', true]
+    ])
+  })
+
+  it('uses throttled tpa when the followed player is online but not visible', async () => {
+    const { createFollowController } = require('../bot')
+    const events = []
+    let now = 10000
+    const bot = followBot({
+      players: { Cat2246: {} }
+    }, events)
+    const controller = createFollowController(bot, {
+      now: () => now,
+      tpaCooldownMs: 1000
+    })
+
+    await controller.followPlayer('Cat2246')
+    await controller.tick()
+    await controller.tick()
+    now += 1000
+    await controller.tick()
+
+    assert.deepStrictEqual(events, [
+      ['chat', '/tpa Cat2246'],
+      ['chat', '/tpa Cat2246']
+    ])
+  })
+
+  it('does not pick up nearby dropped items while pickup is disabled', async () => {
+    const { createFollowController } = require('../bot')
+    const events = []
+    const bot = followBot({
+      players: {
+        Cat2246: {
+          entity: {
+            username: 'Cat2246',
+            position: combatPosition(6, 64, 0)
+          }
+        }
+      },
+      entities: {
+        item: {
+          type: 'object',
+          name: 'item',
+          position: combatPosition(2, 64, 0)
+        }
+      }
+    }, events)
+    const controller = createFollowController(bot)
+
+    await controller.followPlayer('Cat2246')
+    await controller.tick()
+
+    assert.deepStrictEqual(events, [
+      ['setGoal', 'GoalFollow', 'Cat2246', true]
+    ])
+  })
+
+  it('picks up nearby dropped items while pickup is enabled', async () => {
+    const { createFollowController } = require('../bot')
+    const events = []
+    const bot = followBot({
+      players: {
+        Cat2246: {
+          entity: {
+            username: 'Cat2246',
+            position: combatPosition(6, 64, 0)
+          }
+        }
+      },
+      entities: {
+        item: {
+          type: 'object',
+          name: 'item',
+          position: combatPosition(2, 64, 0)
+        }
+      }
+    }, events)
+    const controller = createFollowController(bot)
+
+    await controller.followPlayer('Cat2246')
+    controller.togglePickup()
+    await controller.tick()
+
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalNear', 2, 64, 0]
+    ])
+  })
+
+  it('does not read deprecated objectType while scanning dropped items', () => {
+    const { findNearestDroppedItem } = require('../bot')
+    const bot = followBot({
+      entities: {
+        zombie: {
+          type: 'mob',
+          name: 'zombie',
+          displayName: 'Zombie',
+          position: combatPosition(1, 64, 0),
+          get objectType () {
+            throw new Error('objectType should not be read')
+          }
+        }
+      }
+    })
+
+    assert.strictEqual(findNearestDroppedItem(bot, 8), null)
+  })
+
+  it('messages the followed player when inventory is full or food is needed', async () => {
+    const { createFollowController } = require('../bot')
+    const events = []
+    const bot = followBot({
+      food: 6,
+      players: {
+        Cat2246: {
+          entity: {
+            username: 'Cat2246',
+            position: combatPosition(6, 64, 0)
+          }
+        }
+      },
+      inventory: {
+        items: () => [],
+        emptySlotCount: () => 0
+      }
+    }, events)
+    const controller = createFollowController(bot, {
+      now: () => 10000,
+      notifyCooldownMs: 1000
+    })
+
+    await controller.followPlayer('Cat2246')
+    await controller.tick()
+
+    assert(events.some(event => event[0] === 'whisper' && event[2].includes('inventory is full')))
+    assert(events.some(event => event[0] === 'whisper' && event[2].includes('need food')))
+  })
+
+  it('unloads inventory into a nearby chest', async () => {
+    const { createFollowController } = require('../bot')
+    const events = []
+    const chestBlock = block('chest', 1, 64, 0)
+    const item = { name: 'diamond', type: 264, metadata: 0, count: 3 }
+    const chest = {
+      deposit: async (type, metadata, count) => events.push(['deposit', type, metadata, count]),
+      close: () => events.push(['close'])
+    }
+    const bot = followBot({
+      blocks: [chestBlock],
+      inventory: {
+        items: () => [item],
+        emptySlotCount: () => 10
+      },
+      openContainer: async target => {
+        events.push(['openContainer', target.name])
+        return chest
+      }
+    }, events)
+    const controller = createFollowController(bot)
+
+    const result = await controller.unloadInventory()
+
+    assert.strictEqual(result.ok, true)
+    assert.deepStrictEqual(events, [
+      ['openContainer', 'chest'],
+      ['deposit', 264, 0, 3],
+      ['close']
+    ])
+  })
+
+  it('tries another nearby chest when the first unload chest is full', async () => {
+    const { createFollowController } = require('../bot')
+    const events = []
+    const fullChestBlock = block('chest', 1, 64, 0)
+    const openChestBlock = block('chest', 2, 64, 0)
+    const item = { name: 'diamond', type: 264, metadata: 0, count: 3 }
+    const fullChest = {
+      deposit: async () => {
+        throw new Error('destination full')
+      },
+      close: () => events.push(['close', 1])
+    }
+    const openChest = {
+      deposit: async (type, metadata, count) => events.push(['deposit', 2, type, metadata, count]),
+      close: () => events.push(['close', 2])
+    }
+    const bot = followBot({
+      blocks: [fullChestBlock, openChestBlock],
+      inventory: {
+        items: () => [item],
+        emptySlotCount: () => 10
+      },
+      openContainer: async target => {
+        events.push(['openContainer', target.position.x])
+        return target.position.x === 1 ? fullChest : openChest
+      }
+    }, events)
+    const controller = createFollowController(bot)
+
+    const result = await controller.unloadInventory()
+
+    assert.strictEqual(result.ok, true)
+    assert.deepStrictEqual(events, [
+      ['openContainer', 1],
+      ['close', 1],
+      ['openContainer', 2],
+      ['deposit', 2, 264, 0, 3],
+      ['close', 2]
+    ])
   })
 
   it('builds Codex CLI args for GPT-5.4 fast responses', () => {
@@ -2950,6 +3383,50 @@ function autoEatBot (items = [], events = []) {
     equip: async (item, destination) => events.push(['equip', item.name, destination]),
     consume: async () => events.push(['consume'])
   }
+}
+
+function followBot (options = {}, events = []) {
+  const bot = new EventEmitter()
+  bot.entity = {
+    position: combatPosition(0, 64, 0)
+  }
+  bot.players = options.players || {}
+  bot.entities = options.entities || {}
+  bot.food = options.food ?? 20
+  bot.health = options.health ?? 20
+  bot.inventory = options.inventory || {
+    items: () => [],
+    emptySlotCount: () => 10
+  }
+  bot.pathfinder = options.pathfinder || {
+    setGoal: (goal, dynamic) => {
+      if (goal === null) {
+        events.push(['setGoal', null, null, dynamic])
+        return
+      }
+      events.push([
+        'setGoal',
+        goal.constructor.name,
+        goal.entity?.username || goal.entity?.name || goal.x,
+        dynamic
+      ])
+    },
+    goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+  }
+  bot.chat = message => events.push(['chat', message])
+  bot.whisper = (playerName, message) => events.push(['whisper', playerName, message])
+  bot.findBlocks = ({ matching }) => (options.blocks || [])
+    .filter(candidate => matching(candidate))
+    .map(candidate => candidate.position)
+  bot.blockAt = position => (options.blocks || []).find(candidate =>
+    candidate.position.x === position.x &&
+    candidate.position.y === position.y &&
+    candidate.position.z === position.z
+  ) || null
+  bot.openContainer = options.openContainer || (async () => {
+    throw new Error('openContainer was not configured')
+  })
+  return bot
 }
 
 function combatPosition (x, y, z) {
