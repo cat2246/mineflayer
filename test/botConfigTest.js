@@ -720,6 +720,35 @@ describe('holocraft bot config', function () {
     assert.deepStrictEqual(events, [['startAutomation', 0]])
   })
 
+  it('toggles night safety from the automation menu', async () => {
+    const { createCommandConsole } = require('../bot')
+    const output = []
+    const events = []
+    const bot = new EventEmitter()
+
+    const consoleController = createCommandConsole(bot, {
+      output: message => output.push(message),
+      automationManager: {
+        list: () => [{ name: 'Wood cutting' }],
+        startByIndex: async index => events.push(['startAutomation', index])
+      },
+      nightSafetyController: {
+        isEnabled: () => true,
+        toggleEnabled: () => {
+          events.push(['toggleNightSafety'])
+          return { enabled: false, message: 'Night safety disabled.' }
+        }
+      }
+    })
+
+    await consoleController.handleLine('/automation')
+    await consoleController.handleLine('2')
+
+    assert(output.some(message => message.includes('2. Night safety (on)')))
+    assert(output.some(message => message.includes('Night safety disabled.')))
+    assert.deepStrictEqual(events, [['toggleNightSafety']])
+  })
+
   it('lists farming and wild roaming in the default automation menu', async () => {
     const { createAutomationManager } = require('../bot')
     const events = []
@@ -2900,6 +2929,32 @@ describe('holocraft bot config', function () {
     await new Promise(resolve => setImmediate(resolve))
 
     assert.deepStrictEqual(events, [])
+  })
+
+  it('does not run the night safety loop while disabled', async () => {
+    const { attachNightSafety } = require('../bot')
+    const bot = new EventEmitter()
+    const events = []
+    bot.physicsEnabled = true
+    bot.time = { isDay: false, timeOfDay: 14000 }
+
+    const controller = attachNightSafety(bot, {
+      checkIntervalMs: 0,
+      enabled: false,
+      debugLog: () => {},
+      runNightSafetyCycle: async () => events.push(['night'])
+    })
+
+    await new Promise(resolve => setImmediate(resolve))
+    await controller.check()
+
+    assert.deepStrictEqual(events, [])
+
+    const result = controller.toggleEnabled()
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.strictEqual(result.enabled, true)
+    assert.deepStrictEqual(events, [['night']])
   })
 
   it('does not start daytime automation when physics becomes enabled after a daytime spawn', async () => {

@@ -18,8 +18,29 @@ function createCommandConsole (bot, options = {}) {
   const automationManager = options.automationManager || createAutomationManager(bot, { output, debugLog })
   const followController = options.followController || createFollowController(bot, { output, debugLog })
   const knockbackController = options.knockbackController
+  const nightSafetyController = options.nightSafetyController
   let pendingHomes = null
-  let pendingAutomation = false
+  let pendingAutomation = null
+
+  function hasNightSafetyToggle () {
+    return typeof nightSafetyController?.toggleEnabled === 'function'
+  }
+
+  function nightSafetyStatus () {
+    if (typeof nightSafetyController?.isEnabled !== 'function') return 'on'
+    return nightSafetyController.isEnabled() ? 'on' : 'off'
+  }
+
+  function automationMenu () {
+    const automations = automationManager.list()
+    const items = automations.map(({ name }) => ({ name }))
+    if (hasNightSafetyToggle()) items.push({ name: `Night safety (${nightSafetyStatus()})`, nightSafety: true })
+    return {
+      automations,
+      items,
+      hasNightSafetyToggle: hasNightSafetyToggle()
+    }
+  }
 
   async function handleLine (line) {
     const command = line.trim()
@@ -28,7 +49,7 @@ function createCommandConsole (bot, options = {}) {
 
     if (command.toLowerCase() === 'cancel') {
       pendingHomes = null
-      pendingAutomation = false
+      pendingAutomation = null
       output('Cancelled.')
       return
     }
@@ -50,8 +71,14 @@ function createCommandConsole (bot, options = {}) {
         output('Choose a valid automation number, or type cancel.')
         return
       }
+      if (choice === pendingAutomation.automations.length + 1 && pendingAutomation.hasNightSafetyToggle) {
+        const result = nightSafetyController.toggleEnabled()
+        output(result.message)
+        pendingAutomation = null
+        return
+      }
       const started = await automationManager.startByIndex(choice - 1)
-      if (started !== false) pendingAutomation = false
+      if (started !== false) pendingAutomation = null
       return
     }
 
@@ -138,18 +165,18 @@ function createCommandConsole (bot, options = {}) {
     }
 
     if (command.toLowerCase() === '/automation' || command.toLowerCase() === '/automations') {
-      const automations = automationManager.list()
-      if (automations.length === 0) {
+      const menu = automationMenu()
+      if (menu.items.length === 0) {
         output('No automations are available.')
         return
       }
 
-      pendingAutomation = true
+      pendingAutomation = menu
       output('Automations:')
-      automations.forEach((automation, index) => {
-        output(`${index + 1}. ${automation.name}`)
+      menu.items.forEach((item, index) => {
+        output(`${index + 1}. ${item.name}`)
       })
-      output('Type a number to start, or cancel.')
+      output(`Type a number to ${menu.hasNightSafetyToggle ? 'start or toggle' : 'start'}, or cancel.`)
       return
     }
 

@@ -609,12 +609,14 @@ function attachNightSafety (bot, options = {}) {
   const now = options.now || Date.now
   const nightRetryDelayMs = options.nightRetryDelayMs ?? NIGHT_SAFETY_RETRY_DELAY_MS
   const autoStartDaytimeAutomation = options.autoStartDaytimeAutomation === true
+  let enabled = options.enabled !== false
   let running = false
   let lastPeriod = null
   let nightHomeAnchor = null
   let nextNightRetryAt = 0
 
   async function checkTime () {
+    if (!enabled) return
     if (running || bot._ended) return
     if (bot.physicsEnabled === false) return
 
@@ -675,6 +677,26 @@ function attachNightSafety (bot, options = {}) {
     }
   }
 
+  function isEnabled () {
+    return enabled
+  }
+
+  function setEnabled (value) {
+    enabled = Boolean(value)
+    lastPeriod = null
+    nextNightRetryAt = 0
+    debugLog('nightSafety.toggle', { enabled })
+    if (enabled) Promise.resolve().then(checkTime)
+    return {
+      enabled,
+      message: `Night safety ${enabled ? 'enabled' : 'disabled'}.`
+    }
+  }
+
+  function toggleEnabled () {
+    return setEnabled(!enabled)
+  }
+
   bot.on('time', () => {
     checkTime()
   })
@@ -705,6 +727,9 @@ function attachNightSafety (bot, options = {}) {
 
   return {
     check: checkTime,
+    isEnabled,
+    setEnabled,
+    toggleEnabled,
     stop
   }
 }
