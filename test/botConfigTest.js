@@ -1887,9 +1887,10 @@ describe('holocraft bot config', function () {
     assert(entries.some(entry => entry.event === 'automation.woodcutting.noTree'))
   })
 
-  it('walks to nearby dropped items after cutting a tree log', async () => {
+  it('randomizes wood cutting action, post-dig, and drop pickup waits', async () => {
     const { cutTreeLog } = require('../bot')
     const events = []
+    const sleeps = []
     const treeLog = block('oak_log', 0, 64, 0)
     const bot = blockBot([
       treeLog,
@@ -1908,7 +1909,8 @@ describe('holocraft bot config', function () {
 
     await cutTreeLog(bot, treeLog, {
       debugLog: () => {},
-      sleep: async () => {}
+      randomInt: (min, max) => max,
+      sleep: async ms => sleeps.push(ms)
     })
 
     assert.deepStrictEqual(events, [
@@ -1916,9 +1918,10 @@ describe('holocraft bot config', function () {
       ['dig', 'oak_log'],
       ['goto', 'GoalNear', 1, 64, 0]
     ])
+    assert.deepStrictEqual(sleeps, [975, 1950, 1300])
   })
 
-  it('looks at the log and pauses before digging', async () => {
+  it('randomizes the look-before-dig pause', async () => {
     const { cutTreeLog } = require('../bot')
     const events = []
     const treeLog = block('oak_log', 0, 64, 0)
@@ -1934,6 +1937,7 @@ describe('holocraft bot config', function () {
 
     await cutTreeLog(bot, treeLog, {
       debugLog: () => {},
+      randomInt: (min, max) => max,
       sleep: async ms => events.push(['sleep', ms])
     })
 
@@ -1941,12 +1945,64 @@ describe('holocraft bot config', function () {
       ['control', 'sprint', false],
       ['control', 'jump', false],
       ['lookAt', 0.5, 64.5, 0.5, true],
-      ['sleep', 750],
+      ['sleep', 975],
       ['dig', 'oak_log']
     ])
-    assert.strictEqual(events[events.length - 1][0], 'sleep')
-    assert(events[events.length - 1][1] >= 1000)
-    assert(events[events.length - 1][1] <= 1600)
+    assert.deepStrictEqual(events[events.length - 1], ['sleep', 1950])
+  })
+
+  it('randomizes the home wait before depositing wood', async () => {
+    const { depositWoodAtHome } = require('../bot')
+    const events = []
+    const sleeps = []
+    const chest = block('chest', 1, 64, 0)
+    const bot = blockBot([chest], events)
+    bot.chat = message => events.push(['chat', message])
+    bot.inventory.items = () => [{ name: 'oak_log', type: 17, count: 3 }]
+    bot.openContainer = async containerBlock => {
+      events.push(['openContainer', containerBlock.name])
+      return {
+        deposit: async (type, metadata, count) => events.push(['deposit', type, metadata, count]),
+        close: () => events.push(['close'])
+      }
+    }
+
+    await depositWoodAtHome(bot, {
+      debugLog: () => {},
+      randomInt: (min, max) => max,
+      sleep: async ms => sleeps.push(ms)
+    })
+
+    assert.deepStrictEqual(sleeps, [6500])
+    assert.deepStrictEqual(events, [
+      ['chat', '/home home'],
+      ['openContainer', 'chest'],
+      ['deposit', 17, null, 3],
+      ['close']
+    ])
+  })
+
+  it('randomizes the quota loop delay after an empty wood cutting cycle', async () => {
+    const { runWoodCuttingQuotaTask } = require('../bot')
+    const sleeps = []
+    let stopped = false
+
+    const completed = await runWoodCuttingQuotaTask({ _ended: false }, {
+      countWoodItems: () => 0,
+      debugLog: () => {},
+      depositWoodAtHome: async () => true,
+      randomInt: (min, max) => max,
+      runWoodCuttingCycle: async () => false,
+      shouldStop: () => stopped,
+      sleep: async ms => {
+        sleeps.push(ms)
+        stopped = true
+      },
+      targetWoodCount: 1
+    })
+
+    assert.strictEqual(completed, false)
+    assert.deepStrictEqual(sleeps, [2600])
   })
 
   it('sanitizes component enchant data during wood cutting dig time', async () => {
@@ -2653,6 +2709,7 @@ describe('holocraft bot config', function () {
       targetWoodCount: 1,
       loopDelayMs: 100,
       debugLog: () => {},
+      randomInt: (min, max) => max,
       sleep: async ms => events.push(['sleep', ms]),
       countWoodItems: () => woodCount,
       runWoodCuttingCycle: async () => {
@@ -2666,9 +2723,9 @@ describe('holocraft bot config', function () {
 
     assert.deepStrictEqual(events, [
       ['woodCycle', 1],
-      ['sleep', 200],
+      ['sleep', 260],
       ['woodCycle', 2],
-      ['sleep', 300],
+      ['sleep', 390],
       ['woodCycle', 3],
       ['depositWood']
     ])

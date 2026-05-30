@@ -109,6 +109,15 @@ function currentTime (options = {}) {
   return typeof options.now === 'function' ? options.now() : Date.now()
 }
 
+function randomizedWoodcuttingDelayMs (baseDelayMs, options = {}) {
+  if (!Number.isFinite(baseDelayMs) || baseDelayMs <= 0) return baseDelayMs
+
+  const minDelayMs = Math.max(1, Math.floor(baseDelayMs * 0.7))
+  const maxDelayMs = Math.max(minDelayMs, Math.ceil(baseDelayMs * 1.3))
+  const randomInt = options.randomInt || getRandomInt
+  return randomInt(minDelayMs, maxDelayMs)
+}
+
 function ignoredLogMap (bot) {
   if (!bot.__woodcuttingIgnoredLogs) {
     bot.__woodcuttingIgnoredLogs = new Map()
@@ -487,7 +496,7 @@ async function placeScaffoldBelowBot (bot, options = {}) {
     for (let attempt = 0; attempt < 10; attempt++) {
       if (isWoodcuttingStopped(bot, options)) return false
       if ((bot.entity?.position?.y ?? 0) > jumpY) break
-      await wait(100)
+      await wait(randomizedWoodcuttingDelayMs(100, options))
     }
 
     if (isWoodcuttingStopped(bot, options)) return false
@@ -511,7 +520,7 @@ async function placeScaffoldBelowBot (bot, options = {}) {
       reference: positionData(referenceBlock.position)
     })
     if (!isWoodcuttingStopped(bot, options)) {
-      await wait(WOODCUTTING_ACTION_DELAY_MS)
+      await wait(randomizedWoodcuttingDelayMs(WOODCUTTING_ACTION_DELAY_MS, options))
     }
   }
 
@@ -542,7 +551,8 @@ async function buildScaffoldUntilReachable (bot, block, options = {}) {
 async function prepareForManualDig (bot, block, options = {}) {
   const wait = options.sleep || sleep
   const debugLog = options.debugLog || (() => {})
-  const actionDelayMs = options.actionDelayMs ?? WOODCUTTING_ACTION_DELAY_MS
+  const baseActionDelayMs = options.actionDelayMs ?? WOODCUTTING_ACTION_DELAY_MS
+  const actionDelayMs = randomizedWoodcuttingDelayMs(baseActionDelayMs, options)
 
   if (isWoodcuttingStopped(bot, options)) return false
 
@@ -578,7 +588,8 @@ async function prepareForManualDig (bot, block, options = {}) {
 async function waitAfterDig (block, options = {}) {
   const wait = options.sleep || sleep
   const debugLog = options.debugLog || (() => {})
-  const postDigDelayMs = getRandomInt(1000, 1600) ?? WOODCUTTING_POST_DIG_DELAY_MS
+  const basePostDigDelayMs = options.postDigDelayMs ?? WOODCUTTING_POST_DIG_DELAY_MS
+  const postDigDelayMs = randomizedWoodcuttingDelayMs(basePostDigDelayMs, options)
 
   if (isWoodcuttingStopped(null, options)) return false
 
@@ -620,7 +631,7 @@ function findNearbyDroppedItems (bot, originPosition, options = {}) {
 async function collectNearbyDrops (bot, originPosition, options = {}) {
   const wait = options.sleep || sleep
   const debugLog = options.debugLog || (() => {})
-  const pickupWaitMs = options.dropPickupWaitMs ?? WOODCUTTING_DROP_PICKUP_WAIT_MS
+  const basePickupWaitMs = options.dropPickupWaitMs ?? WOODCUTTING_DROP_PICKUP_WAIT_MS
   const collectCount = options.dropCollectCount ?? WOODCUTTING_DROP_COLLECT_COUNT
 
   if (!bot.pathfinder || !originPosition) return 0
@@ -644,6 +655,7 @@ async function collectNearbyDrops (bot, originPosition, options = {}) {
     if (isWoodcuttingStopped(bot, options)) break
     if (!reached) continue
     collected++
+    const pickupWaitMs = randomizedWoodcuttingDelayMs(basePickupWaitMs, options)
     if (pickupWaitMs > 0 && !isWoodcuttingStopped(bot, options)) await wait(pickupWaitMs)
   }
 
@@ -1039,11 +1051,11 @@ async function depositWoodAtHome (bot, options = {}) {
   const wait = options.sleep || sleep
   const debugLog = options.debugLog || (() => {})
   const homeCommand = options.homeCommand || WOODCUTTING_HOME_COMMAND
-  const homeWaitMs = options.homeWaitMs ?? WOODCUTTING_HOME_WAIT_MS
+  const baseHomeWaitMs = options.homeWaitMs ?? WOODCUTTING_HOME_WAIT_MS
 
   if (isWoodcuttingStopped(bot, options)) return false
   bot.chat(homeCommand)
-  await wait(homeWaitMs)
+  await wait(randomizedWoodcuttingDelayMs(baseHomeWaitMs, options))
   if (isWoodcuttingStopped(bot, options)) return false
 
   const containerBlock = findNearbyContainer(bot, options)
@@ -1136,7 +1148,7 @@ async function runWoodCuttingQuotaTask (bot, options = {}) {
     }
 
     if (collected >= targetWoodCount || lastCount >= targetWoodCount) break
-    await wait(woodcuttingLoopDelay(options, emptyCycles))
+    await wait(randomizedWoodcuttingDelayMs(woodcuttingLoopDelay(options, emptyCycles), options))
   }
 
   if (!bot._ended && !options.shouldStop?.()) await deposit(bot, options)
@@ -1177,7 +1189,7 @@ function startWoodCuttingAutomation (bot, options = {}) {
         debugLog('automation.woodcutting.error', { message: err.message, stack: err.stack })
       }
       if (shouldStop()) break
-      await wait(loopDelayMs)
+      await wait(randomizedWoodcuttingDelayMs(loopDelayMs, activeOptions))
     }
     debugLog('automation.woodcutting.stop')
   }
