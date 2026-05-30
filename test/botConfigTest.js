@@ -396,26 +396,159 @@ describe('holocraft bot config', function () {
   it('performs sword combat against a nearby hostile mob', async () => {
     const { runCombatTick } = require('../bot')
     const events = []
+    const sleeps = []
     const target = combatTarget('zombie', 3)
     const bot = combatBot([{ name: 'diamond_sword' }], events)
 
     await runCombatTick(bot, {
       targetFinder: () => target,
+      randomInt: (min, max) => max,
+      sleep: async ms => sleeps.push(ms),
       debugLog: () => {}
     })
 
-    assert.deepStrictEqual(events, [
-      ['pathfinderStop'],
-      ['equip', 'diamond_sword', 'hand'],
-      ['lookAt'],
-      ['attack', 'zombie']
+    assert.strictEqual(events[0][0], 'pathfinderStop')
+    assert.deepStrictEqual(events[1], ['equip', 'diamond_sword', 'hand'])
+    assert.strictEqual(events.filter(event => event[0] === 'lookAt').length, 5)
+    assert(events.filter(event => event[0] === 'lookAt').every(event => event[1] === false))
+    assert.deepStrictEqual(events[events.length - 1], ['attack', 'zombie', false])
+    assert.deepStrictEqual(sleeps, [55, 55, 55, 55])
+  })
+
+  it('aims along a curved accelerated path before sword attacks', async () => {
+    const { runCombatTick } = require('../bot')
+    const events = []
+    const target = combatTarget('zombie', 3)
+    const bot = combatBot([{ name: 'diamond_sword' }], events)
+
+    await runCombatTick(bot, {
+      targetFinder: () => target,
+      randomInt: (min, max) => max,
+      sleep: async () => {},
+      debugLog: () => {}
+    })
+
+    const lookPoints = events
+      .filter(event => event[0] === 'lookAt')
+      .map(event => event[2])
+
+    assert.strictEqual(lookPoints.length, 5)
+    assert(lookPoints.slice(0, -1).some(point => point.z !== 0))
+    assert(lookPoints[1].x - lookPoints[0].x < lookPoints[2].x - lookPoints[1].x)
+    assert.deepStrictEqual(lookPoints[lookPoints.length - 1], { x: 3, y: 1.8, z: 0 })
+  })
+
+  it('does not attack when the bot is not facing the mob after aiming', async () => {
+    const { runCombatTick } = require('../bot')
+    const events = []
+    const target = combatTarget('zombie', 2)
+    const bot = combatBot([{ name: 'diamond_sword' }], events)
+    bot.lookAt = async (point, force) => events.push(['lookAt', force, { x: point.x, y: point.y, z: point.z }])
+
+    const action = await runCombatTick(bot, {
+      targetFinder: () => target,
+      now: () => 1000,
+      randomInt: (min, max) => max,
+      sleep: async () => {},
+      debugLog: () => {}
+    })
+
+    assert.strictEqual(action.type, 'wait')
+    assert.strictEqual(action.reason, 'not-facing-target')
+    assert.strictEqual(events.some(event => event[0] === 'swingArm'), false)
+    assert.strictEqual(events.some(event => event[0] === 'attack'), false)
+  })
+
+  it('swings the arm immediately before sending a direct attack', async () => {
+    const { runCombatTick } = require('../bot')
+    const events = []
+    const target = combatTarget('zombie', 2)
+    const bot = combatBot([{ name: 'diamond_sword' }], events)
+
+    const action = await runCombatTick(bot, {
+      targetFinder: () => target,
+      now: () => 1000,
+      randomInt: (min, max) => max,
+      sleep: async () => {},
+      debugLog: () => {}
+    })
+
+    assert.strictEqual(action.type, 'sword')
+    assert.deepStrictEqual(events.slice(-2), [
+      ['swingArm', 'right', true],
+      ['attack', 'zombie', false]
     ])
   })
 
-  it('delegates hostile targets to mineflayer-pvp when available', async () => {
+  it('waits a randomized cooldown before hitting a mob again', async () => {
     const { runCombatTick } = require('../bot')
     const events = []
-    const target = combatTarget('zombie', 7)
+    const target = combatTarget('zombie', 2)
+    const bot = combatBot([{ name: 'diamond_sword' }], events)
+    let now = 1000
+
+    await runCombatTick(bot, {
+      targetFinder: () => target,
+      now: () => now,
+      randomInt: (min, max) => max,
+      sleep: async () => {},
+      debugLog: () => {}
+    })
+    now = 2000
+    await runCombatTick(bot, {
+      targetFinder: () => target,
+      now: () => now,
+      randomInt: (min, max) => max,
+      sleep: async () => {},
+      debugLog: () => {}
+    })
+    now = 2500
+    await runCombatTick(bot, {
+      targetFinder: () => target,
+      now: () => now,
+      randomInt: (min, max) => max,
+      sleep: async () => {},
+      debugLog: () => {}
+    })
+
+    assert.strictEqual(events.filter(event => event[0] === 'attack').length, 2)
+    assert.strictEqual(events.filter(event => event[0] === 'lookAt').length, 10)
+    assert(events.filter(event => event[0] === 'lookAt').every(event => event[1] === false))
+  })
+
+  it('only hits mobs inside the randomized melee range', async () => {
+    const { runCombatTick } = require('../bot')
+    const events = []
+    const target = combatTarget('zombie', 2)
+    const bot = combatBot([{ name: 'diamond_sword' }], events)
+
+    const skipped = await runCombatTick(bot, {
+      targetFinder: () => target,
+      now: () => 1000,
+      randomInt: (min, max) => min,
+      sleep: async () => {},
+      debugLog: () => {}
+    })
+    const attacked = await runCombatTick(bot, {
+      targetFinder: () => target,
+      now: () => 1000,
+      randomInt: (min, max) => max,
+      sleep: async () => {},
+      debugLog: () => {}
+    })
+
+    assert.strictEqual(skipped.type, 'wait')
+    assert.strictEqual(skipped.reason, 'out-of-melee-range')
+    assert.strictEqual(attacked.type, 'sword')
+    assert.strictEqual(events.filter(event => event[0] === 'attack').length, 1)
+    assert.strictEqual(events.filter(event => event[0] === 'lookAt').length, 5)
+    assert(events.filter(event => event[0] === 'lookAt').every(event => event[1] === false))
+  })
+
+  it('uses controlled melee packets when pvp is available', async () => {
+    const { runCombatTick } = require('../bot')
+    const events = []
+    const target = combatTarget('zombie', 2)
     const bot = combatBot([{ name: 'diamond_sword' }], events)
     bot.pvp = {
       target: null,
@@ -424,14 +557,17 @@ describe('holocraft bot config', function () {
 
     const action = await runCombatTick(bot, {
       targetFinder: () => target,
+      now: () => 1000,
+      randomInt: (min, max) => max,
       debugLog: () => {}
     })
 
     assert.strictEqual(action.type, 'pvp')
     assert(bot.__combatActiveUntil >= Date.now())
-    assert.deepStrictEqual(events, [
-      ['equip', 'diamond_sword', 'hand'],
-      ['pvpAttack', 'zombie']
+    assert.deepStrictEqual(events.filter(event => event[0] === 'pvpAttack'), [])
+    assert.deepStrictEqual(events.slice(-2), [
+      ['swingArm', 'right', true],
+      ['attack', 'zombie', false]
     ])
   })
 
@@ -448,16 +584,15 @@ describe('holocraft bot config', function () {
 
     const action = await runCombatTick(bot, {
       targetFinder: () => target,
+      randomInt: (min, max) => max,
+      sleep: async () => {},
       debugLog: () => {}
     })
 
     assert.strictEqual(action.type, 'sword')
-    assert.deepStrictEqual(events, [
-      ['pathfinderStop'],
-      ['equip', 'diamond_sword', 'hand'],
-      ['lookAt'],
-      ['attack', 'zombie']
-    ])
+    assert.strictEqual(events.filter(event => event[0] === 'attack').length, 1)
+    assert.strictEqual(events.filter(event => event[0] === 'lookAt').length, 5)
+    assert(events.filter(event => event[0] === 'lookAt').every(event => event[1] === false))
   })
 
   it('pauses movement on hurt without stopping the pvp target', () => {
@@ -574,47 +709,55 @@ describe('holocraft bot config', function () {
     assert.deepStrictEqual(events, [])
   })
 
-  it('performs bow combat against a far hostile mob', async () => {
+  it('randomizes bow combat draw wait against a far hostile mob', async () => {
     const { runCombatTick } = require('../bot')
     const events = []
+    const sleeps = []
     const target = combatTarget('zombie', 6)
     const bot = combatBot([{ name: 'bow' }, { name: 'arrow' }], events)
 
     await runCombatTick(bot, {
       targetFinder: () => target,
-      sleep: async () => {},
+      randomInt: (min, max) => max,
+      sleep: async ms => sleeps.push(ms),
       debugLog: () => {}
     })
 
-    assert.deepStrictEqual(events, [
+    assert.deepStrictEqual(events.filter(event => event[0] !== 'lookAt'), [
       ['pathfinderStop'],
       ['equip', 'bow', 'hand'],
-      ['lookAt'],
       ['activateItem'],
       ['deactivateItem']
     ])
+    assert.strictEqual(events.filter(event => event[0] === 'lookAt').length, 5)
+    assert(events.filter(event => event[0] === 'lookAt').every(event => event[1] === false))
+    assert.deepStrictEqual(sleeps, [55, 55, 55, 55, 1040])
   })
 
-  it('tries to flee from a hostile mob when unarmed', async () => {
+  it('randomizes flee combat wait when unarmed', async () => {
     const { runCombatTick } = require('../bot')
     const events = []
+    const sleeps = []
     const target = combatTarget('zombie', 3)
     const bot = combatBot([], events)
 
     await runCombatTick(bot, {
       targetFinder: () => target,
-      sleep: async () => {},
+      randomInt: (min, max) => max,
+      sleep: async ms => sleeps.push(ms),
       debugLog: () => {}
     })
 
-    assert.deepStrictEqual(events, [
+    assert.deepStrictEqual(events.filter(event => event[0] !== 'lookAt'), [
       ['pathfinderStop'],
-      ['lookAt'],
       ['control', 'back', true],
       ['control', 'jump', true],
       ['control', 'back', false],
       ['control', 'jump', false]
     ])
+    assert.strictEqual(events.filter(event => event[0] === 'lookAt').length, 5)
+    assert(events.filter(event => event[0] === 'lookAt').every(event => event[1] === false))
+    assert.deepStrictEqual(sleeps, [55, 55, 55, 55, 1300])
   })
 
   it('eats the best safe food when hunger is not full', async () => {
@@ -3499,16 +3642,33 @@ describe('holocraft bot config', function () {
 })
 
 function combatBot (items = [], events = []) {
-  return {
+  const bot = {
     entity: {
-      position: combatPosition(0, 0, 0)
+      position: combatPosition(0, 0, 0),
+      eyeHeight: 1.62,
+      yaw: 0,
+      pitch: 0
     },
     inventory: {
       items: () => items
     },
     equip: async (item, destination) => events.push(['equip', item.name, destination]),
-    lookAt: async () => events.push(['lookAt']),
-    attack: target => events.push(['attack', target.name]),
+    lookAt: async (point, force) => {
+      events.push(['lookAt', force, { x: point.x, y: point.y, z: point.z }])
+      const delta = {
+        x: point.x - bot.entity.position.x,
+        y: point.y - (bot.entity.position.y + bot.entity.eyeHeight),
+        z: point.z - bot.entity.position.z
+      }
+      bot.entity.yaw = Math.atan2(-delta.x, -delta.z)
+      bot.entity.pitch = Math.atan2(delta.y, Math.sqrt(delta.x * delta.x + delta.z * delta.z))
+    },
+    swingArm: (arm, showHand) => events.push(['swingArm', arm, showHand]),
+    attack: (target, swing) => {
+      const event = ['attack', target.name]
+      if (swing !== undefined) event.push(swing)
+      events.push(event)
+    },
     activateItem: () => events.push(['activateItem']),
     deactivateItem: () => events.push(['deactivateItem']),
     pathfinder: {
@@ -3518,6 +3678,7 @@ function combatBot (items = [], events = []) {
     },
     setControlState: (control, state) => events.push(['control', control, state])
   }
+  return bot
 }
 
 function combatTarget (name, x) {
