@@ -2,7 +2,6 @@ const vec3 = require('vec3')
 const { goals: { GoalGetToBlock, GoalNear, GoalNearXZ } } = require('mineflayer-pathfinder')
 const {
   WOODCUTTING_ACTION_DELAY_MS,
-  WOODCUTTING_CHEST_SEARCH_RADIUS,
   WOODCUTTING_DROP_COLLECT_COUNT,
   WOODCUTTING_DROP_PICKUP_WAIT_MS,
   WOODCUTTING_DROP_SEARCH_RADIUS,
@@ -22,6 +21,12 @@ const {
   WOODCUTTING_SURVIVAL_REACH_DISTANCE,
   WOODCUTTING_TREE_SEARCH_RADIUS
 } = require('./config')
+const {
+  findNearbyContainerBlocks,
+  isDestinationFullError,
+  rememberHouseAnchor,
+  visitContainerBlocks
+} = require('./containers')
 const { sleep } = require('./time')
 
 function isLogName (name = '') {
@@ -57,10 +62,6 @@ const SCAFFOLD_ITEM_PRIORITY = [
 ]
 
 const WOODCUTTING_IGNORED_TREE_CLUSTER_RADIUS = 2
-
-function isContainerBlockName (name = '') {
-  return /^(chest|trapped_chest|barrel)$/i.test(name)
-}
 
 function isBuildingBlockName (name = '') {
   return /planks|stairs|slab|fence|door|trapdoor|glass|pane|brick|stone|cobblestone|concrete|terracotta|wool|carpet|chest|barrel|crafting_table|furnace|lantern|torch|bed/i.test(name)
@@ -1042,11 +1043,6 @@ async function cutTreeLog (bot, treeLog, options = {}) {
   return true
 }
 
-function findNearbyContainer (bot, options = {}) {
-  const searchRadius = options.chestSearchRadius ?? WOODCUTTING_CHEST_SEARCH_RADIUS
-  return findNearestBlock(bot, block => isContainerBlockName(block.name), searchRadius)
-}
-
 async function depositWoodAtHome (bot, options = {}) {
   const wait = options.sleep || sleep
   const debugLog = options.debugLog || (() => {})
@@ -1058,28 +1054,42 @@ async function depositWoodAtHome (bot, options = {}) {
   await wait(randomizedWoodcuttingDelayMs(baseHomeWaitMs, options))
   if (isWoodcuttingStopped(bot, options)) return false
 
-  const containerBlock = findNearbyContainer(bot, options)
-  if (!containerBlock) {
+  const homeAnchor = rememberHouseAnchor(bot, bot.entity?.position, options)
+  const containerOptions = {
+    ...options,
+    houseOnly: options.houseOnly ?? true,
+    originPosition: options.originPosition || homeAnchor || bot.entity?.position
+  }
+  const containerBlocks = findNearbyContainerBlocks(bot, containerOptions)
+  if (containerBlocks.length === 0) {
     debugLog('automation.woodcutting.deposit.missingContainer')
     return false
   }
 
-  const container = await bot.openContainer(containerBlock)
-  try {
+  return visitContainerBlocks(bot, containerBlocks, containerOptions, async (container, containerBlock) => {
     const woodItems = bot.inventory.items().filter(item => isWoodItemName(item.name))
+    if (woodItems.length === 0) return true
+
     for (const item of woodItems) {
       if (isWoodcuttingStopped(bot, options)) break
-      await container.deposit(item.type, null, item.count)
-      debugLog('automation.woodcutting.deposit.item', {
-        item: item.name,
-        count: item.count
-      })
+      try {
+        await container.deposit(item.type, null, item.count)
+        debugLog('automation.woodcutting.deposit.item', {
+          item: item.name,
+          count: item.count,
+          container: containerBlock.position
+        })
+      } catch (err) {
+        if (!isDestinationFullError(err)) throw err
+        debugLog('automation.woodcutting.deposit.fullContainer', {
+          container: containerBlock.position
+        })
+        return false
+      }
     }
-  } finally {
-    container.close()
-  }
 
-  return true
+    return true
+  })
 }
 
 async function runWoodCuttingCycle (bot, options = {}) {
@@ -1165,6 +1175,7 @@ function startWoodCuttingAutomation (bot, options = {}) {
   const debugLog = options.debugLog || (() => {})
   const output = options.output || console.log
   const loopDelayMs = options.loopDelayMs ?? WOODCUTTING_LOOP_DELAY_MS
+  const cycle = options.runWoodCuttingCycle || runWoodCuttingCycle
   const externalShouldStop = options.shouldStop
   let stopped = false
   const shouldStop = () => stopped ||
@@ -1183,7 +1194,11 @@ function startWoodCuttingAutomation (bot, options = {}) {
     for (;;) {
       if (shouldStop()) break
       try {
-        await runWoodCuttingCycle(bot, activeOptions)
+        const result = await cycle(bot, activeOptions)
+        if (!result) {
+          output('Wood cutting automation task completed.')
+          break
+        }
       } catch (err) {
         output(`Wood cutting error: ${err.message}`)
         debugLog('automation.woodcutting.error', { message: err.message, stack: err.stack })

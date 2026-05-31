@@ -7,6 +7,16 @@ const {
 const { stopBotMovement } = require('./deathRecovery')
 const { sleep } = require('./time')
 const { runDaytimeAutomationSequence } = require('./daytimeTasks')
+const {
+  allContainersSearchedWithoutDesiredItems,
+  containerItems,
+  filterContainerBlocksForDesiredItems,
+  findNearbyContainerBlocks,
+  isDestinationFullError,
+  rememberHouseAnchor,
+  visitContainerBlocks,
+  visitNearbyContainers
+} = require('./containers')
 
 const NIGHT_SAFETY_CHECK_INTERVAL_MS = 5000
 const NIGHT_SAFETY_HOME_RETRY_RADIUS = 24
@@ -79,12 +89,6 @@ function inventoryItems (bot) {
   return typeof bot.inventory?.items === 'function' ? bot.inventory.items() : []
 }
 
-function containerItems (container) {
-  if (typeof container.containerItems === 'function') return container.containerItems()
-  if (typeof container.items === 'function') return container.items()
-  return []
-}
-
 function isFoodItem (bot, item) {
   return Boolean(
     item?.name &&
@@ -111,10 +115,6 @@ function isArmorItem (item) {
 
 function shouldKeepInventoryItem (bot, item) {
   return isToolOrWeaponItem(item) || isArmorItem(item) || isFoodItem(bot, item) || isFuelItem(item)
-}
-
-function isContainerBlockName (name = '') {
-  return /^(chest|trapped_chest|barrel)$/i.test(name)
 }
 
 function isFurnaceBlockName (name = '') {
@@ -341,28 +341,36 @@ async function depositLoot (bot, options = {}) {
   const skipTypes = options.skipTypes || new Set()
   if (typeof bot.openContainer !== 'function') return false
 
-  const containerBlock = findNearbyBlock(bot, block => isContainerBlockName(block.name), options)
-  if (!containerBlock) {
+  const containerBlocks = findNearbyContainerBlocks(bot, options)
+  if (containerBlocks.length === 0) {
     debugLog('nightSafety.deposit.missingContainer')
     return false
   }
 
-  await goNearBlock(bot, containerBlock, options)
-  const container = await bot.openContainer(containerBlock)
-  try {
+  return visitNearbyContainers(bot, options, async (container, containerBlock) => {
+    const items = inventoryItems(bot).filter(item => !skipTypes.has(item.type) && !shouldKeepInventoryItem(bot, item))
+    if (items.length === 0) return true
+
     for (const item of inventoryItems(bot)) {
       if (skipTypes.has(item.type) || shouldKeepInventoryItem(bot, item)) continue
-      await container.deposit(item.type, null, item.count)
-      debugLog('nightSafety.deposit.item', {
-        item: item.name,
-        count: item.count
-      })
+      try {
+        await container.deposit(item.type, null, item.count)
+        debugLog('nightSafety.deposit.item', {
+          item: item.name,
+          count: item.count,
+          container: containerBlock.position
+        })
+      } catch (err) {
+        if (!isDestinationFullError(err)) throw err
+        debugLog('nightSafety.deposit.fullContainer', {
+          container: containerBlock.position
+        })
+        return false
+      }
     }
-  } finally {
-    if (typeof container.close === 'function') container.close()
-  }
 
-  return true
+    return true
+  })
 }
 
 function findNearbyBed (bot, options = {}) {
@@ -465,24 +473,35 @@ function hasItemMatching (bot, matcher) {
   return inventoryItems(bot).some(matcher)
 }
 
-function foodCount (bot) {
+function itemCountMatching (bot, matcher) {
   return inventoryItems(bot)
-    .filter(item => isFoodItem(bot, item))
+    .filter(matcher)
     .reduce((sum, item) => sum + item.count, 0)
 }
 
+function foodCount (bot) {
+  return itemCountMatching(bot, item => isFoodItem(bot, item))
+}
+
 function missingGearNeeds (bot, options = {}) {
-  const minimumFood = options.minimumFood ?? 4
+  const targetFood = options.targetFood ?? 32
+  const targetDirt = options.targetDirt ?? 64
+  const targetArrows = options.targetArrows ?? 32
   const needs = []
 
   if (!hasItemMatching(bot, item => /_sword$/i.test(item.name))) needs.push({ name: 'sword', matcher: item => /_sword$/i.test(item.name), count: 1 })
   if (!hasItemMatching(bot, item => /_axe$/i.test(item.name))) needs.push({ name: 'axe', matcher: item => /_axe$/i.test(item.name), count: 1 })
   if (!hasItemMatching(bot, item => /_pickaxe$/i.test(item.name))) needs.push({ name: 'pickaxe', matcher: item => /_pickaxe$/i.test(item.name), count: 1 })
-  if (foodCount(bot) < minimumFood) {
+  if (!hasItemMatching(bot, item => item.name === 'bow')) needs.push({ name: 'bow', matcher: item => item.name === 'bow', count: 1 })
+  const arrowCount = itemCountMatching(bot, item => item.name === 'arrow')
+  if (arrowCount < targetArrows) needs.push({ name: 'arrows', matcher: item => item.name === 'arrow', count: targetArrows - arrowCount })
+  const dirtCount = itemCountMatching(bot, item => item.name === 'dirt')
+  if (dirtCount < targetDirt) needs.push({ name: 'dirt', matcher: item => item.name === 'dirt', count: targetDirt - dirtCount })
+  if (foodCount(bot) < targetFood) {
     needs.push({
       name: 'food',
       matcher: item => isFoodItem(bot, item),
-      count: item => Math.max(minimumFood - foodCount(bot), item.count)
+      count: () => targetFood - foodCount(bot)
     })
   }
 
@@ -491,6 +510,12 @@ function missingGearNeeds (bot, options = {}) {
 
 async function runDayGearCycle (bot, options = {}) {
   const debugLog = options.debugLog || (() => {})
+  const homeAnchor = rememberHouseAnchor(bot, options.originPosition || bot.entity?.position, options)
+  const containerOptions = {
+    ...options,
+    houseOnly: options.houseOnly ?? true,
+    originPosition: options.originPosition || homeAnchor
+  }
 
   if (bot.isSleeping && typeof bot.wake === 'function') {
     await bot.wake()
@@ -501,34 +526,60 @@ async function runDayGearCycle (bot, options = {}) {
   if (needs.length === 0) return true
 
   if (typeof bot.openContainer !== 'function') return false
-  const containerBlock = findNearbyBlock(bot, block => isContainerBlockName(block.name), options)
-  if (!containerBlock) {
+  const containerBlocks = findNearbyContainerBlocks(bot, {
+    ...containerOptions,
+    desiredItems: needs
+  })
+  if (containerBlocks.length === 0) {
     debugLog('nightSafety.gear.missingContainer', { needs: needs.map(need => need.name) })
-    return false
+    return true
   }
 
-  await goNearBlock(bot, containerBlock, options)
-  const container = await bot.openContainer(containerBlock)
-  try {
-    for (const need of needs) {
-      const item = containerItems(container).find(need.matcher)
-      if (!item) {
-        debugLog('nightSafety.gear.missingItem', { item: need.name })
-        continue
-      }
+  const remainingNeeds = needs.map(need => ({
+    ...need,
+    remaining: typeof need.count === 'function' ? need.count() : need.count
+  }))
+  let searchableBlocks = filterContainerBlocksForDesiredItems(bot, containerBlocks, remainingNeeds, containerOptions)
+  if (searchableBlocks.length === 0 && allContainersSearchedWithoutDesiredItems(bot, containerBlocks, remainingNeeds, containerOptions)) {
+    for (const need of remainingNeeds) {
+      if (need.remaining > 0) debugLog('nightSafety.gear.missingItem', { item: need.name, searchedAllContainers: true })
+    }
+    return true
+  }
 
-      const count = typeof need.count === 'function' ? need.count(item) : need.count
-      await container.withdraw(item.type, null, Math.min(count, item.count))
+  const completed = await visitContainerBlocks(bot, searchableBlocks, {
+    ...containerOptions,
+    desiredItems: remainingNeeds
+  }, async (container, containerBlock) => {
+    for (const need of remainingNeeds) {
+      if (need.remaining <= 0) continue
+      const item = containerItems(container).find(need.matcher)
+      if (!item) continue
+
+      const count = Math.min(need.remaining, item.count)
+      await container.withdraw(item.type, null, count)
+      need.remaining -= count
       debugLog('nightSafety.gear.withdraw', {
         item: item.name,
-        count: Math.min(count, item.count)
+        count,
+        container: containerBlock.position
       })
     }
-  } finally {
-    if (typeof container.close === 'function') container.close()
+
+    return remainingNeeds.every(need => need.remaining <= 0)
+  })
+
+  searchableBlocks = filterContainerBlocksForDesiredItems(bot, containerBlocks, remainingNeeds, containerOptions)
+  for (const need of remainingNeeds) {
+    if (need.remaining > 0) debugLog('nightSafety.gear.missingItem', { item: need.name })
   }
 
-  return true
+  if (completed) return true
+  if (searchableBlocks.length === 0 && allContainersSearchedWithoutDesiredItems(bot, containerBlocks, remainingNeeds, containerOptions)) {
+    debugLog('nightSafety.gear.searchComplete', { missing: remainingNeeds.filter(need => need.remaining > 0).map(need => need.name) })
+    return true
+  }
+  return false
 }
 
 async function runNightSafetyCycle (bot, options = {}) {
@@ -554,6 +605,7 @@ async function runNightSafetyCycle (bot, options = {}) {
     }
     const originPosition = clonePosition(options.originPosition || bot.entity?.position)
     bot.__nightSafetyHomeAnchor = originPosition
+    rememberHouseAnchor(bot, originPosition, options)
     const homeOptions = {
       ...options,
       originPosition,

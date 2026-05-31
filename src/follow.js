@@ -8,14 +8,13 @@ const {
   FOLLOW_NOTIFY_COOLDOWN_MS,
   FOLLOW_TPA_COOLDOWN_MS
 } = require('./config')
+const {
+  findNearbyContainerBlocks,
+  isDestinationFullError,
+  visitContainerBlocks
+} = require('./containers')
 const { isMovementPaused } = require('./knockbackPause')
 const { openNearbyDoor } = require('./nightSafety')
-
-const CHEST_BLOCK_NAMES = new Set([
-  'barrel',
-  'chest',
-  'trapped_chest'
-])
 
 function distanceToPosition (bot, position) {
   const botPosition = bot.entity?.position
@@ -93,29 +92,11 @@ function findNearestDroppedItem (bot, maxDistance) {
 }
 
 function findNearbyChestBlocks (bot, maxDistance) {
-  if (typeof bot.findBlocks !== 'function' || typeof bot.blockAt !== 'function') return []
-
-  return bot.findBlocks({
-    matching: block => CHEST_BLOCK_NAMES.has(block.name),
-    maxDistance,
-    count: 16
-  })
-    .map(position => bot.blockAt(position))
-    .filter(Boolean)
-    .map(block => ({
-      block,
-      distance: distanceToPosition(bot, block.position)
-    }))
-    .sort((a, b) => a.distance - b.distance)
-    .map(({ block }) => block)
+  return findNearbyContainerBlocks(bot, { chestSearchRadius: maxDistance, houseOnly: false })
 }
 
 function findNearestChestBlock (bot, maxDistance) {
   return findNearbyChestBlocks(bot, maxDistance)[0] || null
-}
-
-function isDestinationFullError (err) {
-  return /destination full/i.test(err?.message || '')
 }
 
 function createFollowController (bot, options = {}) {
@@ -270,20 +251,20 @@ function createFollowController (bot, options = {}) {
     if (typeof bot.openContainer !== 'function') return { ok: false, message: 'Cannot open nearby chest.' }
 
     let triedFullChest = false
-    for (const chest of chests) {
-      if (typeof bot.pathfinder?.goto === 'function' && distanceToPosition(bot, chest.position) > 4) {
-        await bot.pathfinder.goto(new GoalNear(chest.position.x, chest.position.y, chest.position.z, 2))
-      }
-
-      const container = await bot.openContainer(chest)
+    const unloaded = await visitContainerBlocks(bot, chests, {
+      ...options,
+      chestSearchRadius,
+      houseOnly: false,
+      originPosition: bot.entity?.position
+    }, async (container, chest) => {
       try {
         const currentItems = inventoryItems(bot).filter(item => item && item.count > 0)
-        if (currentItems.length === 0) return { ok: true, message: 'Unloaded inventory.' }
+        if (currentItems.length === 0) return true
         for (const item of currentItems) {
           await container.deposit(item.type, item.metadata ?? null, item.count)
         }
         debugLog('follow.unload', { itemCount: currentItems.length })
-        return { ok: true, message: 'Unloaded inventory.' }
+        return true
       } catch (err) {
         if (!isDestinationFullError(err)) throw err
         triedFullChest = true
@@ -292,11 +273,11 @@ function createFollowController (bot, options = {}) {
           y: chest.position.y,
           z: chest.position.z
         })
-      } finally {
-        if (typeof container.close === 'function') container.close()
+        return false
       }
-    }
+    })
 
+    if (unloaded) return { ok: true, message: 'Unloaded inventory.' }
     return {
       ok: false,
       message: triedFullChest

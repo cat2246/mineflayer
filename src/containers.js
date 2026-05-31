@@ -1,0 +1,413 @@
+const fs = require('fs')
+const path = require('path')
+const { goals: { GoalNear } } = require('mineflayer-pathfinder')
+const {
+  CONTAINER_HOUSE_SIZE,
+  CONTAINER_INTERACTION_DELAY_MAX_MS,
+  CONTAINER_INTERACTION_DELAY_MIN_MS,
+  CONTAINER_MEMORY_PATH,
+  WOODCUTTING_CHEST_SEARCH_RADIUS
+} = require('./config')
+const { sleep } = require('./time')
+
+const MEMORY_VERSION = 1
+
+function distanceBetween (a, b) {
+  if (typeof a?.distanceTo === 'function') return a.distanceTo(b)
+  return Math.sqrt(
+    Math.pow(a.x - b.x, 2) +
+    Math.pow(a.y - b.y, 2) +
+    Math.pow(a.z - b.z, 2)
+  )
+}
+
+function clonePosition (position) {
+  if (!position) return null
+  return {
+    x: position.x,
+    y: position.y,
+    z: position.z
+  }
+}
+
+function isContainerBlockName (name = '') {
+  return /^(chest|trapped_chest|barrel)$/i.test(name)
+}
+
+function containerItems (container) {
+  if (typeof container.containerItems === 'function') return container.containerItems()
+  if (typeof container.items === 'function') return container.items()
+  return []
+}
+
+function isDestinationFullError (err) {
+  return /destination full/i.test(err?.message || '')
+}
+
+function dimensionName (bot, options = {}) {
+  return String(options.dimension || bot.game?.dimension || 'overworld')
+}
+
+function positionKey (position) {
+  return `${Math.round(position.x)},${Math.round(position.y)},${Math.round(position.z)}`
+}
+
+function containerKey (bot, blockOrPosition, options = {}) {
+  const position = blockOrPosition.position || blockOrPosition
+  return `${dimensionName(bot, options)}:${positionKey(position)}`
+}
+
+function emptyContainerMemory () {
+  return {
+    version: MEMORY_VERSION,
+    home: null,
+    containers: {}
+  }
+}
+
+function normalizeContainerMemory (memory) {
+  if (!memory || typeof memory !== 'object') return emptyContainerMemory()
+  return {
+    version: MEMORY_VERSION,
+    home: memory.home || null,
+    containers: memory.containers && typeof memory.containers === 'object' ? memory.containers : {}
+  }
+}
+
+function containerMemoryPath (options = {}) {
+  if (options.containerMemoryPath === false) return null
+  return options.containerMemoryPath || CONTAINER_MEMORY_PATH
+}
+
+function readContainerMemory (options = {}) {
+  const filePath = containerMemoryPath(options)
+  if (!filePath || !fs.existsSync(filePath)) return emptyContainerMemory()
+
+  try {
+    return normalizeContainerMemory(JSON.parse(fs.readFileSync(filePath, 'utf8')))
+  } catch (err) {
+    return emptyContainerMemory()
+  }
+}
+
+function writeContainerMemory (memory, options = {}) {
+  const filePath = containerMemoryPath(options)
+  if (!filePath) return
+
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true })
+    fs.writeFileSync(filePath, `${JSON.stringify(normalizeContainerMemory(memory), null, 2)}\n`)
+  } catch (err) {
+    // Memory is an optimization. Chest actions should keep working if the file is unavailable.
+  }
+}
+
+function updateContainerMemory (options, updater) {
+  const memory = readContainerMemory(options)
+  const nextMemory = updater(memory) || memory
+  writeContainerMemory(nextMemory, options)
+  return nextMemory
+}
+
+function rememberedHomeAnchor (bot, options = {}) {
+  if (options.originPosition) return clonePosition(options.originPosition)
+  if (bot.__containerHomeAnchor) return clonePosition(bot.__containerHomeAnchor)
+  if (bot.__nightSafetyHomeAnchor) return clonePosition(bot.__nightSafetyHomeAnchor)
+
+  const memory = readContainerMemory(options)
+  return clonePosition(memory.home?.position)
+}
+
+function rememberHouseAnchor (bot, position, options = {}) {
+  const anchor = clonePosition(position)
+  if (!anchor) return null
+
+  bot.__containerHomeAnchor = anchor
+  updateContainerMemory(options, memory => {
+    memory.home = {
+      dimension: dimensionName(bot, options),
+      position: anchor,
+      updatedAt: Date.now()
+    }
+    return memory
+  })
+  return anchor
+}
+
+function shouldUseHouseBounds (bot, options = {}) {
+  if (options.houseOnly === false) return false
+  if (options.houseOnly === true) return true
+  return Boolean(options.originPosition || bot.__containerHomeAnchor || bot.__nightSafetyHomeAnchor)
+}
+
+function houseHalfSize (options = {}) {
+  return (options.houseSize ?? CONTAINER_HOUSE_SIZE) / 2
+}
+
+function isWithinHouseBounds (position, anchor, options = {}) {
+  if (!position || !anchor) return false
+  const halfSize = houseHalfSize(options)
+  return Math.abs(position.x - anchor.x) <= halfSize &&
+    Math.abs(position.y - anchor.y) <= halfSize &&
+    Math.abs(position.z - anchor.z) <= halfSize
+}
+
+function searchRadiusForOptions (bot, options = {}) {
+  if (shouldUseHouseBounds(bot, options) && rememberedHomeAnchor(bot, options)) {
+    const cubeRadius = Math.ceil(Math.sqrt(3) * houseHalfSize(options))
+    return options.chestSearchRadius ?? options.searchRadius ?? cubeRadius
+  }
+  return options.chestSearchRadius ?? options.searchRadius ?? WOODCUTTING_CHEST_SEARCH_RADIUS
+}
+
+function itemSnapshot (item) {
+  return {
+    name: item.name,
+    type: item.type,
+    metadata: item.metadata ?? null,
+    count: item.count
+  }
+}
+
+function rememberContainerBlocks (bot, blocks, options = {}) {
+  if (!Array.isArray(blocks) || blocks.length === 0) return
+
+  const anchor = rememberedHomeAnchor(bot, options)
+  updateContainerMemory(options, memory => {
+    if (anchor) {
+      memory.home = memory.home || {
+        dimension: dimensionName(bot, options),
+        position: anchor,
+        updatedAt: Date.now()
+      }
+    }
+
+    for (const block of blocks) {
+      if (!block?.position) continue
+      const key = containerKey(bot, block, options)
+      const existing = memory.containers[key] || {}
+      memory.containers[key] = {
+        ...existing,
+        dimension: dimensionName(bot, options),
+        name: block.name,
+        position: clonePosition(block.position),
+        discoveredAt: existing.discoveredAt || Date.now(),
+        lastSeenAt: Date.now(),
+        searchedAt: existing.searchedAt || null,
+        items: Array.isArray(existing.items) ? existing.items : []
+      }
+    }
+    return memory
+  })
+}
+
+function rememberContainerContents (bot, block, container, options = {}) {
+  if (!block?.position) return
+
+  updateContainerMemory(options, memory => {
+    const key = containerKey(bot, block, options)
+    const existing = memory.containers[key] || {}
+    memory.containers[key] = {
+      ...existing,
+      dimension: dimensionName(bot, options),
+      name: block.name,
+      position: clonePosition(block.position),
+      discoveredAt: existing.discoveredAt || Date.now(),
+      lastSeenAt: Date.now(),
+      searchedAt: Date.now(),
+      items: containerItems(container)
+        .filter(item => item && item.count > 0)
+        .map(itemSnapshot)
+    }
+    return memory
+  })
+}
+
+function containerMemoryRecord (bot, block, options = {}) {
+  if (!block?.position) return null
+  return readContainerMemory(options).containers[containerKey(bot, block, options)] || null
+}
+
+function itemMatchesAnyNeed (item, needs = []) {
+  return needs.some(need => typeof need.matcher === 'function' && need.matcher(item))
+}
+
+function containerRecordHasDesiredItems (record, desiredItems = []) {
+  if (!record?.searchedAt || desiredItems.length === 0) return false
+  return (record.items || []).some(item => itemMatchesAnyNeed(item, desiredItems))
+}
+
+function sortContainerBlocksByMemory (bot, blocks, options = {}) {
+  const desiredItems = options.desiredItems || []
+  if (desiredItems.length === 0) return blocks
+
+  const memory = readContainerMemory(options)
+  return blocks
+    .map((block, index) => {
+      const record = memory.containers[containerKey(bot, block, options)]
+      const hasDesiredItems = containerRecordHasDesiredItems(record, desiredItems)
+      const searched = Boolean(record?.searchedAt)
+      return {
+        block,
+        index,
+        rank: hasDesiredItems ? 0 : searched ? 2 : 1
+      }
+    })
+    .sort((a, b) => a.rank - b.rank || a.index - b.index)
+    .map(({ block }) => block)
+}
+
+function filterContainerBlocksForDesiredItems (bot, blocks, desiredItems = [], options = {}) {
+  if (desiredItems.length === 0) return blocks
+  const memory = readContainerMemory(options)
+  return blocks.filter(block => {
+    const record = memory.containers[containerKey(bot, block, options)]
+    if (!record?.searchedAt) return true
+    return containerRecordHasDesiredItems(record, desiredItems)
+  })
+}
+
+function allContainersSearchedWithoutDesiredItems (bot, blocks, desiredItems = [], options = {}) {
+  if (blocks.length === 0 || desiredItems.length === 0) return false
+
+  const memory = readContainerMemory(options)
+  return blocks.every(block => {
+    const record = memory.containers[containerKey(bot, block, options)]
+    return Boolean(record?.searchedAt) && !containerRecordHasDesiredItems(record, desiredItems)
+  })
+}
+
+function findNearbyContainerBlocks (bot, options = {}) {
+  const searchRadius = searchRadiusForOptions(bot, options)
+  const houseOnly = shouldUseHouseBounds(bot, options)
+  const homeAnchor = rememberedHomeAnchor(bot, options)
+  const originPosition = homeAnchor || options.originPosition || bot.entity?.position
+
+  if (typeof bot.findBlocks === 'function' && typeof bot.blockAt === 'function') {
+    const positions = bot.findBlocks({
+      matching: block => isContainerBlockName(block.name),
+      maxDistance: searchRadius,
+      count: options.containerCandidateCount ?? 64
+    })
+    const blocks = positions
+      .map(position => bot.blockAt(position))
+      .filter(Boolean)
+      .filter(block => {
+        if (houseOnly && homeAnchor) return isWithinHouseBounds(block.position, homeAnchor, options)
+        return !originPosition || distanceBetween(originPosition, block.position) <= searchRadius
+      })
+      .sort((a, b) => {
+        if (!originPosition) return 0
+        return distanceBetween(originPosition, a.position) - distanceBetween(originPosition, b.position)
+      })
+
+    rememberContainerBlocks(bot, blocks, options)
+    return sortContainerBlocksByMemory(bot, blocks, options)
+  }
+
+  if (typeof bot.findBlock !== 'function') return []
+  const block = bot.findBlock({
+    matching: block => isContainerBlockName(block.name),
+    maxDistance: searchRadius
+  })
+  const blocks = block && (!houseOnly || !homeAnchor || isWithinHouseBounds(block.position, homeAnchor, options)) ? [block] : []
+  rememberContainerBlocks(bot, blocks, options)
+  return sortContainerBlocksByMemory(bot, blocks, options)
+}
+
+async function approachContainerBlock (bot, block, options = {}) {
+  if (options.approachContainers === false) return true
+  if (!block?.position || typeof bot.pathfinder?.goto !== 'function') return true
+  const botPosition = bot.entity?.position
+  if (botPosition && distanceBetween(botPosition, block.position) <= (options.containerApproachDistance ?? 4)) return true
+
+  await bot.pathfinder.goto(new GoalNear(block.position.x, block.position.y, block.position.z, options.range ?? 2))
+  return true
+}
+
+function containerInteractionDelayMs (options = {}) {
+  if (typeof options.containerInteractionDelayMs === 'number') return Math.max(0, options.containerInteractionDelayMs)
+
+  const range = options.containerDelayRangeMs || [
+    CONTAINER_INTERACTION_DELAY_MIN_MS,
+    CONTAINER_INTERACTION_DELAY_MAX_MS
+  ]
+  const min = Math.max(0, range[0] ?? CONTAINER_INTERACTION_DELAY_MIN_MS)
+  const max = Math.max(min, range[1] ?? CONTAINER_INTERACTION_DELAY_MAX_MS)
+  const random = options.random || Math.random
+  return Math.round(min + random() * (max - min))
+}
+
+async function waitForContainerInteraction (options = {}, phase = 'container') {
+  const delayMs = containerInteractionDelayMs(options)
+  if (delayMs <= 0) return
+
+  const wait = options.sleep || sleep
+  const debugLog = options.debugLog || (() => {})
+  debugLog('container.delay', { phase, delayMs })
+  await wait(delayMs)
+}
+
+async function visitContainerBlocks (bot, blocks, options = {}, visitor) {
+  if (typeof bot.openContainer !== 'function') return false
+
+  rememberContainerBlocks(bot, blocks, options)
+  for (const block of blocks) {
+    await approachContainerBlock(bot, block, options)
+    const container = await bot.openContainer(block)
+    try {
+      await waitForContainerInteraction(options, 'open')
+      const visited = await visitor(container, block)
+      rememberContainerContents(bot, block, container, options)
+      if (visited) return true
+    } finally {
+      try {
+        await waitForContainerInteraction(options, 'close')
+      } finally {
+        if (typeof container.close === 'function') container.close()
+      }
+    }
+  }
+
+  return false
+}
+
+async function visitNearbyContainers (bot, options = {}, visitor) {
+  const blocks = findNearbyContainerBlocks(bot, options)
+  return visitContainerBlocks(bot, blocks, options, visitor)
+}
+
+async function visitKnownContainers (bot, blocks, options = {}, visitor) {
+  if (typeof bot.openContainer !== 'function') return false
+
+  for (const block of blocks) {
+    await approachContainerBlock(bot, block, options)
+    const container = await bot.openContainer(block)
+    try {
+      if (await visitor(container, block)) return true
+    } finally {
+      if (typeof container.close === 'function') container.close()
+    }
+  }
+
+  return false
+}
+
+module.exports = {
+  allContainersSearchedWithoutDesiredItems,
+  containerItems,
+  containerMemoryRecord,
+  filterContainerBlocksForDesiredItems,
+  findNearbyContainerBlocks,
+  isContainerBlockName,
+  isDestinationFullError,
+  isWithinHouseBounds,
+  readContainerMemory,
+  rememberContainerContents,
+  rememberHouseAnchor,
+  sortContainerBlocksByMemory,
+  visitContainerBlocks,
+  visitKnownContainers,
+  visitNearbyContainers,
+  writeContainerMemory
+}

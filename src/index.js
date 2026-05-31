@@ -5,6 +5,7 @@ module.exports = {
   ...require('./combat'),
   ...require('./commandConsole'),
   ...require('./config'),
+  ...require('./containers'),
   ...require('./createBot'),
   ...require('./daytimeTasks'),
   ...require('./deathRecovery'),

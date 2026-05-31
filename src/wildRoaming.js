@@ -13,6 +13,7 @@ const PASSIVE_MOB_NAMES = new Set([
   'rabbit',
   'sheep'
 ])
+const OWNED_MOB_MESSAGE_RE = /^That belongs to .+\.$/
 
 function distanceBetween (a, b) {
   if (typeof a?.distanceTo === 'function') return a.distanceTo(b)
@@ -37,6 +38,37 @@ function inventoryItems (bot) {
 
 function findSword (bot) {
   return inventoryItems(bot).find(item => /_sword$/i.test(item.name || '')) || null
+}
+
+function messageText (message) {
+  if (typeof message === 'string') return message
+  if (typeof message?.toString === 'function') return message.toString()
+  return ''
+}
+
+function isOwnedMobMessage (message) {
+  return OWNED_MOB_MESSAGE_RE.test(messageText(message))
+}
+
+function stopPassiveMobAttacks (bot, message, options = {}) {
+  const debugLog = options.debugLog || (() => {})
+  bot.__wildRoamingPassiveMobAttacksBlocked = true
+  if (typeof bot.pathfinder?.setGoal === 'function') bot.pathfinder.setGoal(null)
+  if (typeof bot.pvp?.stop === 'function') bot.pvp.stop()
+  debugLog('automation.wildRoaming.ownedMob', { message: messageText(message) })
+}
+
+function attachOwnedMobMessageHandler (bot, options = {}) {
+  bot.__wildRoamingOwnedMobDebugLog = options.debugLog || (() => {})
+  if (bot.__wildRoamingOwnedMobMessageHandler || typeof bot.on !== 'function') return
+
+  bot.__wildRoamingOwnedMobMessageHandler = (message) => {
+    if (!isOwnedMobMessage(message)) return
+    stopPassiveMobAttacks(bot, message, {
+      debugLog: bot.__wildRoamingOwnedMobDebugLog
+    })
+  }
+  bot.on('message', bot.__wildRoamingOwnedMobMessageHandler)
 }
 
 function findPassiveMobBeyondHomeRadius (bot, originPosition, options = {}) {
@@ -87,7 +119,8 @@ async function runWildRoamingTask (bot, options = {}) {
   const originPosition = options.originPosition || bot.entity?.position
   if (!originPosition) return false
 
-  const target = findPassiveMobBeyondHomeRadius(bot, originPosition, options)
+  attachOwnedMobMessageHandler(bot, { debugLog })
+  const target = bot.__wildRoamingPassiveMobAttacksBlocked ? null : findPassiveMobBeyondHomeRadius(bot, originPosition, options)
   if (target) return attackPassiveMob(bot, target, options)
 
   if (bot._ended || options.shouldStop?.()) return false
@@ -102,6 +135,7 @@ async function runWildRoamingTask (bot, options = {}) {
 module.exports = {
   attackPassiveMob,
   findPassiveMobBeyondHomeRadius,
+  isOwnedMobMessage,
   isPassiveMob,
   runWildRoamingTask
 }

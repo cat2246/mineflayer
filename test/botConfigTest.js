@@ -1576,6 +1576,77 @@ describe('holocraft bot config', function () {
     ])
   })
 
+  it('prints automation task completion status to the terminal', async () => {
+    const { startFarmingAutomation } = require('../bot')
+    const output = []
+    const bot = new EventEmitter()
+    bot.entity = { position: combatPosition(0, 64, 0) }
+    let runCount = 0
+
+    startFarmingAutomation(bot, {
+      output: message => output.push(message),
+      debugLog: () => {},
+      sleep: () => Promise.resolve(),
+      runFarmingTask: async () => {
+        runCount++
+        bot._ended = true
+      }
+    })
+    await Promise.resolve()
+
+    assert.strictEqual(runCount, 1)
+    assert(output.some(message => message.includes('Started Farming automation.')))
+    assert(output.some(message => message.includes('Farming automation task completed.')))
+  })
+
+  it('does not spam completion status after an automation has no more work', async () => {
+    const { startFarmingAutomation } = require('../bot')
+    const output = []
+    const bot = new EventEmitter()
+    bot.entity = { position: combatPosition(0, 64, 0) }
+    let runCount = 0
+    let sleepCount = 0
+
+    startFarmingAutomation(bot, {
+      output: message => output.push(message),
+      debugLog: () => {},
+      sleep: async () => {
+        sleepCount++
+        if (sleepCount >= 2) bot._ended = true
+      },
+      runFarmingTask: async () => {
+        runCount++
+        return 0
+      }
+    })
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.strictEqual(runCount, 1)
+    assert.strictEqual(output.filter(message => message.includes('Farming automation task completed.')).length, 1)
+  })
+
+  it('prints wood cutting task completion status to the terminal', async () => {
+    const { startWoodCuttingAutomation } = require('../bot')
+    const output = []
+    const bot = blockBot([])
+    let runCount = 0
+
+    startWoodCuttingAutomation(bot, {
+      output: message => output.push(message),
+      debugLog: () => {},
+      sleep: () => Promise.resolve(),
+      runWoodCuttingCycle: async () => {
+        runCount++
+        bot._ended = true
+      }
+    })
+    await Promise.resolve()
+
+    assert.strictEqual(runCount, 1)
+    assert(output.some(message => message.includes('Started wood cutting automation.')))
+    assert(output.some(message => message.includes('Wood cutting automation task completed.')))
+  })
+
   it('stops the active automation from the terminal', async () => {
     const { createCommandConsole } = require('../bot')
     const output = []
@@ -1778,7 +1849,10 @@ describe('holocraft bot config', function () {
     const { createFollowController } = require('../bot')
     const events = []
     const bot = followBot({ players: {} }, events)
-    const controller = createFollowController(bot)
+    const controller = createFollowController(bot, {
+      containerInteractionDelayMs: 0,
+      containerMemoryPath: tempContainerMemoryPath()
+    })
 
     const result = await controller.followPlayer('Cat2246')
 
@@ -1797,7 +1871,10 @@ describe('holocraft bot config', function () {
     const bot = followBot({
       players: { Cat2246: { entity: playerEntity } }
     }, events)
-    const controller = createFollowController(bot)
+    const controller = createFollowController(bot, {
+      containerInteractionDelayMs: 0,
+      containerMemoryPath: tempContainerMemoryPath()
+    })
 
     const result = await controller.followPlayer('Cat2246')
     await controller.tick()
@@ -1875,7 +1952,10 @@ describe('holocraft bot config', function () {
         }
       }
     }, events)
-    const controller = createFollowController(bot)
+    const controller = createFollowController(bot, {
+      containerInteractionDelayMs: 0,
+      containerMemoryPath: tempContainerMemoryPath()
+    })
 
     await controller.followPlayer('Cat2246')
     await controller.tick()
@@ -1905,7 +1985,10 @@ describe('holocraft bot config', function () {
         }
       }
     }, events)
-    const controller = createFollowController(bot)
+    const controller = createFollowController(bot, {
+      containerInteractionDelayMs: 0,
+      containerMemoryPath: tempContainerMemoryPath()
+    })
 
     await controller.followPlayer('Cat2246')
     controller.togglePickup()
@@ -1985,7 +2068,10 @@ describe('holocraft bot config', function () {
         return chest
       }
     }, events)
-    const controller = createFollowController(bot)
+    const controller = createFollowController(bot, {
+      containerInteractionDelayMs: 0,
+      containerMemoryPath: tempContainerMemoryPath()
+    })
 
     const result = await controller.unloadInventory()
 
@@ -2024,7 +2110,10 @@ describe('holocraft bot config', function () {
         return target.position.x === 1 ? fullChest : openChest
       }
     }, events)
-    const controller = createFollowController(bot)
+    const controller = createFollowController(bot, {
+      containerInteractionDelayMs: 0,
+      containerMemoryPath: tempContainerMemoryPath()
+    })
 
     const result = await controller.unloadInventory()
 
@@ -2763,6 +2852,8 @@ describe('holocraft bot config', function () {
     }
 
     await depositWoodAtHome(bot, {
+      containerInteractionDelayMs: 0,
+      containerMemoryPath: tempContainerMemoryPath(),
       debugLog: () => {},
       randomInt: (min, max) => max,
       sleep: async ms => sleeps.push(ms)
@@ -2989,6 +3080,7 @@ describe('holocraft bot config', function () {
     bot.openContainer = async () => chest
 
     await depositWoodAtHome(bot, {
+      containerMemoryPath: tempContainerMemoryPath(),
       sleep: async () => {},
       debugLog: () => {}
     })
@@ -2997,6 +3089,38 @@ describe('holocraft bot config', function () {
       ['chat', '/home home'],
       ['deposit', 17, 12],
       ['close']
+    ])
+  })
+
+  it('tries another nearby chest when wood deposit chest is full', async () => {
+    const { depositWoodAtHome } = require('../bot')
+    const events = []
+    const fullChestBlock = block('chest', 1, 64, 0)
+    const openChestBlock = block('chest', 2, 64, 0)
+    const oakLog = { name: 'oak_log', type: 17, count: 12 }
+    const bot = blockBot([fullChestBlock, openChestBlock], events)
+    bot.inventory.items = () => [oakLog]
+    bot.chat = command => events.push(['chat', command])
+    bot.openContainer = async target => ({
+      deposit: async (type, metadata, count) => {
+        events.push(['deposit', target.position.x, type, count])
+        if (target.position.x === 1) throw new Error('destination full')
+      },
+      close: () => events.push(['close', target.position.x])
+    })
+
+    await depositWoodAtHome(bot, {
+      containerMemoryPath: tempContainerMemoryPath(),
+      sleep: async () => {},
+      debugLog: () => {}
+    })
+
+    assert.deepStrictEqual(events, [
+      ['chat', '/home home'],
+      ['deposit', 1, 17, 12],
+      ['close', 1],
+      ['deposit', 2, 17, 12],
+      ['close', 2]
     ])
   })
 
@@ -3342,6 +3466,8 @@ describe('holocraft bot config', function () {
     })
 
     await depositLoot(bot, {
+      containerInteractionDelayMs: 0,
+      containerMemoryPath: tempContainerMemoryPath(),
       originPosition: combatPosition(0, 64, 0),
       debugLog: () => {}
     })
@@ -3349,6 +3475,37 @@ describe('holocraft bot config', function () {
     assert.deepStrictEqual(events, [
       ['deposit', 1, 17, 12],
       ['close', 1]
+    ])
+  })
+
+  it('tries another nearby chest when the first loot chest is full', async () => {
+    const { depositLoot } = require('../bot')
+    const events = []
+    const fullChest = block('chest', 1, 64, 0)
+    const openChest = block('chest', 2, 64, 0)
+    const oakLog = { name: 'oak_log', type: 17, count: 12 }
+    const bot = blockBot([fullChest, openChest], events)
+    bot.inventory.items = () => [oakLog]
+    bot.openContainer = async target => ({
+      deposit: async (type, metadata, count) => {
+        events.push(['deposit', target.position.x, type, count])
+        if (target.position.x === 1) throw new Error('destination full')
+      },
+      close: () => events.push(['close', target.position.x])
+    })
+
+    await depositLoot(bot, {
+      containerInteractionDelayMs: 0,
+      containerMemoryPath: tempContainerMemoryPath(),
+      originPosition: combatPosition(0, 64, 0),
+      debugLog: () => {}
+    })
+
+    assert.deepStrictEqual(events, [
+      ['deposit', 1, 17, 12],
+      ['close', 1],
+      ['deposit', 2, 17, 12],
+      ['close', 2]
     ])
   })
 
@@ -3583,6 +3740,52 @@ describe('holocraft bot config', function () {
     ])
   })
 
+  it('stops attacking passive mobs after an ownership warning', async () => {
+    const { runWildRoamingTask } = require('../bot')
+    const events = []
+    const sheep = {
+      type: 'mob',
+      name: 'sheep',
+      position: combatPosition(120, 64, 0)
+    }
+    const bot = Object.assign(new EventEmitter(), combatBot([{ name: 'iron_sword' }], events))
+    bot.entity.position = combatPosition(0, 64, 0)
+    bot.entities = { 1: sheep }
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z]),
+      setGoal: goal => events.push(['setGoal', goal])
+    }
+
+    const firstRun = await runWildRoamingTask(bot, {
+      originPosition: combatPosition(0, 64, 0),
+      minimumHuntDistance: 100,
+      debugLog: (event, data) => events.push(['debug', event, data?.message || data?.target]),
+      sleep: async () => {},
+      roamTarget: combatPosition(200, 64, 0)
+    })
+    bot.emit('message', 'That belongs to _EraserX_.')
+    const secondRun = await runWildRoamingTask(bot, {
+      originPosition: combatPosition(0, 64, 0),
+      minimumHuntDistance: 100,
+      debugLog: (event, data) => events.push(['debug', event, data?.message || data?.target]),
+      sleep: async () => {},
+      roamTarget: combatPosition(200, 64, 0)
+    })
+
+    assert.strictEqual(firstRun, true)
+    assert.strictEqual(secondRun, true)
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalNear', 120, 64, 0],
+      ['equip', 'iron_sword', 'hand'],
+      ['attack', 'sheep'],
+      ['debug', 'automation.wildRoaming.attack', 'sheep'],
+      ['setGoal', null],
+      ['debug', 'automation.wildRoaming.ownedMob', 'That belongs to _EraserX_.'],
+      ['goto', 'GoalNearXZ', 200, undefined, 0],
+      ['debug', 'automation.wildRoaming.roam', undefined]
+    ])
+  })
+
   it('runs daytime tasks in farming, wood cutting, wild roaming order', async () => {
     const { runDaytimeAutomationSequence } = require('../bot')
     const events = []
@@ -3708,9 +3911,12 @@ describe('holocraft bot config', function () {
     const sword = { name: 'iron_sword', type: 267, count: 1 }
     const axe = { name: 'iron_axe', type: 258, count: 1 }
     const pickaxe = { name: 'iron_pickaxe', type: 257, count: 1 }
-    const bread = { name: 'bread', type: 297, count: 8 }
+    const bow = { name: 'bow', type: 261, count: 1 }
+    const arrow = { name: 'arrow', type: 262, count: 64 }
+    const dirt = { name: 'dirt', type: 3, count: 64 }
+    const bread = { name: 'bread', type: 297, count: 64 }
     const chest = {
-      containerItems: () => [sword, axe, pickaxe, bread],
+      containerItems: () => [sword, axe, pickaxe, bow, arrow, dirt, bread],
       withdraw: async (type, metadata, count) => events.push(['withdraw', type, count]),
       close: () => events.push(['close'])
     }
@@ -3725,6 +3931,8 @@ describe('holocraft bot config', function () {
     bot.openContainer = async () => chest
 
     await runDayGearCycle(bot, {
+      containerInteractionDelayMs: 0,
+      containerMemoryPath: tempContainerMemoryPath(),
       debugLog: () => {}
     })
 
@@ -3732,8 +3940,313 @@ describe('holocraft bot config', function () {
       ['withdraw', 267, 1],
       ['withdraw', 258, 1],
       ['withdraw', 257, 1],
-      ['withdraw', 297, 8],
+      ['withdraw', 261, 1],
+      ['withdraw', 262, 32],
+      ['withdraw', 3, 64],
+      ['withdraw', 297, 32],
       ['close']
+    ])
+  })
+
+  it('tries multiple nearby chests while taking daytime gear', async () => {
+    const { runDayGearCycle } = require('../bot')
+    const events = []
+    const firstChestBlock = block('chest', 1, 64, 0)
+    const secondChestBlock = block('chest', 2, 64, 0)
+    const sword = { name: 'iron_sword', type: 267, count: 1 }
+    const axe = { name: 'iron_axe', type: 258, count: 1 }
+    const pickaxe = { name: 'iron_pickaxe', type: 257, count: 1 }
+    const bow = { name: 'bow', type: 261, count: 1 }
+    const arrow = { name: 'arrow', type: 262, count: 64 }
+    const dirt = { name: 'dirt', type: 3, count: 64 }
+    const bread = { name: 'bread', type: 297, count: 64 }
+    const bot = blockBot([firstChestBlock, secondChestBlock], events)
+    bot.registry = {
+      foodsByName: {
+        bread: { foodPoints: 5, saturation: 6 }
+      }
+    }
+    bot.inventory.items = () => []
+    bot.openContainer = async target => ({
+      containerItems: () => target.position.x === 1 ? [sword] : [axe, pickaxe, bow, arrow, dirt, bread],
+      withdraw: async (type, metadata, count) => events.push(['withdraw', target.position.x, type, count]),
+      close: () => events.push(['close', target.position.x])
+    })
+
+    await runDayGearCycle(bot, {
+      containerInteractionDelayMs: 0,
+      containerMemoryPath: tempContainerMemoryPath(),
+      debugLog: () => {}
+    })
+
+    assert.deepStrictEqual(events, [
+      ['withdraw', 1, 267, 1],
+      ['close', 1],
+      ['withdraw', 2, 258, 1],
+      ['withdraw', 2, 257, 1],
+      ['withdraw', 2, 261, 1],
+      ['withdraw', 2, 262, 32],
+      ['withdraw', 2, 3, 64],
+      ['withdraw', 2, 297, 32],
+      ['close', 2]
+    ])
+  })
+
+  it('opens the cached chest first when daytime gear memory knows where an item is', async () => {
+    const { runDayGearCycle } = require('../bot')
+    const events = []
+    const memoryPath = tempContainerMemoryPath()
+    fs.writeFileSync(memoryPath, JSON.stringify({
+      version: 1,
+      containers: {
+        'overworld:1,64,0': {
+          name: 'chest',
+          position: { x: 1, y: 64, z: 0 },
+          searchedAt: 1,
+          items: [{ name: 'dirt', type: 3, count: 64 }]
+        },
+        'overworld:2,64,0': {
+          name: 'chest',
+          position: { x: 2, y: 64, z: 0 },
+          searchedAt: 1,
+          items: [{ name: 'iron_axe', type: 258, count: 1 }]
+        }
+      }
+    }))
+    const firstChestBlock = block('chest', 1, 64, 0)
+    const secondChestBlock = block('chest', 2, 64, 0)
+    const bot = blockBot([firstChestBlock, secondChestBlock], events)
+    bot.registry = { foodsByName: { bread: { foodPoints: 5, saturation: 6 } } }
+    bot.inventory.items = () => [
+      { name: 'iron_sword', type: 267, count: 1 },
+      { name: 'iron_pickaxe', type: 257, count: 1 },
+      { name: 'bow', type: 261, count: 1 },
+      { name: 'arrow', type: 262, count: 32 },
+      { name: 'dirt', type: 3, count: 64 },
+      { name: 'bread', type: 297, count: 32 }
+    ]
+    bot.openContainer = async target => ({
+      containerItems: () => target.position.x === 2 ? [{ name: 'iron_axe', type: 258, count: 1 }] : [],
+      withdraw: async (type, metadata, count) => events.push(['withdraw', target.position.x, type, count]),
+      close: () => events.push(['close', target.position.x])
+    })
+
+    const gearedUp = await runDayGearCycle(bot, {
+      containerInteractionDelayMs: 0,
+      containerMemoryPath: memoryPath,
+      debugLog: () => {},
+      originPosition: combatPosition(0, 64, 0),
+      searchRadius: 20
+    })
+
+    assert.strictEqual(gearedUp, true)
+    assert.deepStrictEqual(events, [
+      ['withdraw', 2, 258, 1],
+      ['close', 2]
+    ])
+  })
+
+  it('does not reopen searched house chests when memory knows the missing gear is not there', async () => {
+    const { runDayGearCycle } = require('../bot')
+    const events = []
+    const memoryPath = tempContainerMemoryPath()
+    fs.writeFileSync(memoryPath, JSON.stringify({
+      version: 1,
+      containers: {
+        'overworld:1,64,0': {
+          name: 'chest',
+          position: { x: 1, y: 64, z: 0 },
+          searchedAt: 1,
+          items: [{ name: 'dirt', type: 3, count: 64 }]
+        },
+        'overworld:2,64,0': {
+          name: 'chest',
+          position: { x: 2, y: 64, z: 0 },
+          searchedAt: 1,
+          items: [{ name: 'bread', type: 297, count: 64 }]
+        }
+      }
+    }))
+    const bot = blockBot([block('chest', 1, 64, 0), block('chest', 2, 64, 0)], events)
+    bot.registry = { foodsByName: { bread: { foodPoints: 5, saturation: 6 } } }
+    bot.inventory.items = () => [
+      { name: 'iron_sword', type: 267, count: 1 },
+      { name: 'iron_pickaxe', type: 257, count: 1 },
+      { name: 'bow', type: 261, count: 1 },
+      { name: 'arrow', type: 262, count: 32 },
+      { name: 'dirt', type: 3, count: 64 },
+      { name: 'bread', type: 297, count: 32 }
+    ]
+    bot.openContainer = async () => {
+      events.push(['openContainer'])
+      return {
+        containerItems: () => [],
+        close: () => events.push(['close'])
+      }
+    }
+
+    const gearedUp = await runDayGearCycle(bot, {
+      containerInteractionDelayMs: 0,
+      containerMemoryPath: memoryPath,
+      debugLog: () => {},
+      originPosition: combatPosition(0, 64, 0),
+      searchRadius: 20
+    })
+
+    assert.strictEqual(gearedUp, true)
+    assert.deepStrictEqual(events, [])
+  })
+
+  it('finishes daytime gear search after every house chest was searched without finding the item', async () => {
+    const { runDayGearCycle } = require('../bot')
+    const events = []
+    const memoryPath = tempContainerMemoryPath()
+    const bot = blockBot([block('chest', 1, 64, 0), block('chest', 2, 64, 0)], events)
+    bot.registry = { foodsByName: { bread: { foodPoints: 5, saturation: 6 } } }
+    bot.inventory.items = () => [
+      { name: 'iron_sword', type: 267, count: 1 },
+      { name: 'iron_pickaxe', type: 257, count: 1 },
+      { name: 'bow', type: 261, count: 1 },
+      { name: 'arrow', type: 262, count: 32 },
+      { name: 'dirt', type: 3, count: 64 },
+      { name: 'bread', type: 297, count: 32 }
+    ]
+    bot.openContainer = async target => {
+      events.push(['openContainer', target.position.x])
+      return {
+        containerItems: () => [],
+        close: () => events.push(['close', target.position.x])
+      }
+    }
+
+    const gearedUp = await runDayGearCycle(bot, {
+      containerInteractionDelayMs: 0,
+      containerMemoryPath: memoryPath,
+      debugLog: () => {},
+      originPosition: combatPosition(0, 64, 0),
+      searchRadius: 20
+    })
+
+    assert.strictEqual(gearedUp, true)
+    assert.deepStrictEqual(events, [
+      ['openContainer', 1],
+      ['close', 1],
+      ['openContainer', 2],
+      ['close', 2]
+    ])
+  })
+
+  it('only searches house containers inside the configured home cube', async () => {
+    const { runDayGearCycle } = require('../bot')
+    const events = []
+    const bot = blockBot([block('chest', 5, 64, 0), block('chest', 12, 64, 0)], events)
+    bot.registry = { foodsByName: { bread: { foodPoints: 5, saturation: 6 } } }
+    bot.inventory.items = () => [
+      { name: 'iron_sword', type: 267, count: 1 },
+      { name: 'iron_pickaxe', type: 257, count: 1 },
+      { name: 'bow', type: 261, count: 1 },
+      { name: 'arrow', type: 262, count: 32 },
+      { name: 'dirt', type: 3, count: 64 },
+      { name: 'bread', type: 297, count: 32 }
+    ]
+    bot.openContainer = async target => {
+      events.push(['openContainer', target.position.x])
+      return {
+        containerItems: () => target.position.x === 12 ? [{ name: 'iron_axe', type: 258, count: 1 }] : [],
+        withdraw: async (type, metadata, count) => events.push(['withdraw', target.position.x, type, count]),
+        close: () => events.push(['close', target.position.x])
+      }
+    }
+
+    const gearedUp = await runDayGearCycle(bot, {
+      containerInteractionDelayMs: 0,
+      containerMemoryPath: tempContainerMemoryPath(),
+      debugLog: () => {},
+      houseOnly: true,
+      houseSize: 20,
+      originPosition: combatPosition(0, 64, 0),
+      searchRadius: 20
+    })
+
+    assert.strictEqual(gearedUp, true)
+    assert.deepStrictEqual(events, [
+      ['openContainer', 5],
+      ['close', 5]
+    ])
+  })
+
+  it('tops up daytime gear without exceeding configured maximums', async () => {
+    const { runDayGearCycle } = require('../bot')
+    const events = []
+    const chestBlock = block('chest', 3, 64, 0)
+    const arrow = { name: 'arrow', type: 262, count: 64 }
+    const dirt = { name: 'dirt', type: 3, count: 64 }
+    const bread = { name: 'bread', type: 297, count: 64 }
+    const chest = {
+      containerItems: () => [arrow, dirt, bread],
+      withdraw: async (type, metadata, count) => events.push(['withdraw', type, count]),
+      close: () => events.push(['close'])
+    }
+    const bot = blockBot([chestBlock], events)
+    bot.registry = {
+      foodsByName: {
+        bread: { foodPoints: 5, saturation: 6 }
+      }
+    }
+    bot.inventory.items = () => [
+      { name: 'iron_sword', type: 267, count: 1 },
+      { name: 'iron_axe', type: 258, count: 1 },
+      { name: 'iron_pickaxe', type: 257, count: 1 },
+      { name: 'bow', type: 261, count: 1 },
+      { name: 'arrow', type: 262, count: 12 },
+      { name: 'dirt', type: 3, count: 40 },
+      { name: 'bread', type: 297, count: 20 }
+    ]
+    bot.openContainer = async () => chest
+
+    await runDayGearCycle(bot, {
+      containerInteractionDelayMs: 0,
+      containerMemoryPath: tempContainerMemoryPath(),
+      debugLog: () => {}
+    })
+
+    assert.deepStrictEqual(events, [
+      ['withdraw', 262, 20],
+      ['withdraw', 3, 24],
+      ['withdraw', 297, 12],
+      ['close']
+    ])
+  })
+
+  it('waits between opening, using, and closing containers', async () => {
+    const { visitNearbyContainers } = require('../bot')
+    const events = []
+    const bot = blockBot([block('chest', 1, 64, 0)], events)
+    bot.openContainer = async target => {
+      events.push(['openContainer', target.position.x])
+      return {
+        containerItems: () => [],
+        close: () => events.push(['close', target.position.x])
+      }
+    }
+
+    const visited = await visitNearbyContainers(bot, {
+      containerDelayRangeMs: [1000, 3000],
+      containerMemoryPath: tempContainerMemoryPath(),
+      random: () => 0,
+      sleep: async ms => events.push(['sleep', ms])
+    }, async (container, containerBlock) => {
+      events.push(['visit', containerBlock.position.x])
+      return true
+    })
+
+    assert.strictEqual(visited, true)
+    assert.deepStrictEqual(events, [
+      ['openContainer', 1],
+      ['sleep', 1000],
+      ['visit', 1],
+      ['sleep', 1000],
+      ['close', 1]
     ])
   })
 
@@ -3752,10 +4265,14 @@ describe('holocraft bot config', function () {
       { name: 'stone_sword', type: 272, count: 1 },
       { name: 'stone_axe', type: 275, count: 1 },
       { name: 'stone_pickaxe', type: 274, count: 1 },
-      { name: 'bread', type: 297, count: 8 }
+      { name: 'bow', type: 261, count: 1 },
+      { name: 'arrow', type: 262, count: 32 },
+      { name: 'dirt', type: 3, count: 64 },
+      { name: 'bread', type: 297, count: 32 }
     ]
 
     const gearedUp = await runDayGearCycle(bot, {
+      containerMemoryPath: tempContainerMemoryPath(),
       debugLog: () => {}
     })
 
@@ -4457,6 +4974,10 @@ function combatPosition (x, y, z) {
 function sequenceRandom (values) {
   let index = 0
   return () => values[Math.min(index++, values.length - 1)]
+}
+
+function tempContainerMemoryPath () {
+  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'container-memory-')), 'container-memory.txt')
 }
 
 function blockBot (blocks = [], events = []) {

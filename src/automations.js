@@ -20,6 +20,10 @@ function stopPathfinder (bot) {
   if (typeof bot.pathfinder?.setGoal === 'function') bot.pathfinder.setGoal(null)
 }
 
+function taskHasMoreWork (result) {
+  return Boolean(result)
+}
+
 function startLoopAutomation (bot, options = {}) {
   const wait = options.sleep || sleep
   const debugLog = options.debugLog || (() => {})
@@ -43,7 +47,11 @@ function startLoopAutomation (bot, options = {}) {
     for (;;) {
       if (shouldStop()) break
       try {
-        await options.runTask(bot, activeOptions)
+        const result = await options.runTask(bot, activeOptions)
+        if (!taskHasMoreWork(result)) {
+          output(`${options.name} automation task completed.`)
+          break
+        }
       } catch (err) {
         output(`${options.name} error: ${err.message}`)
         debugLog(`${options.eventPrefix}.error`, { message: err.message, stack: err.stack })
