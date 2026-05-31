@@ -7,6 +7,7 @@ const {
 const { stopBotMovement } = require('./deathRecovery')
 const { sleep } = require('./time')
 const { runDaytimeAutomationSequence } = require('./daytimeTasks')
+const { rememberPlaceCoordinates } = require('./places')
 const {
   allContainersSearchedWithoutDesiredItems,
   containerItems,
@@ -606,6 +607,7 @@ async function runNightSafetyCycle (bot, options = {}) {
     const originPosition = clonePosition(options.originPosition || bot.entity?.position)
     bot.__nightSafetyHomeAnchor = originPosition
     rememberHouseAnchor(bot, originPosition, options)
+    rememberPlaceCoordinates(bot, 'home', originPosition, options)
     const homeOptions = {
       ...options,
       originPosition,

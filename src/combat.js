@@ -5,6 +5,7 @@ const {
   COMBAT_FLEE_MS,
   COMBAT_TARGET_RANGE
 } = require('./config')
+const vec3 = require('vec3')
 const { isMovementPaused } = require('./knockbackPause')
 const { sleep } = require('./time')
 
@@ -239,6 +240,11 @@ function pointData (point) {
   }
 }
 
+function vec3Point (point) {
+  if (typeof point?.minus === 'function') return point
+  return vec3(point.x, point.y, point.z)
+}
+
 function eyePosition (bot) {
   const position = bot.entity?.position || { x: 0, y: 0, z: 0 }
   return {
@@ -309,7 +315,7 @@ async function aimAtCombatTarget (bot, target, options = {}) {
       ? targetPoint
       : curvedAimPoint(startPoint, targetPoint, easedT, rawT, curveStrength)
 
-    await bot.lookAt(aimPoint, false)
+    await bot.lookAt(vec3Point(aimPoint), false)
     if (step < steps) {
       await wait(randomCombatInt(COMBAT_AIM_MIN_STEP_MS, COMBAT_AIM_MAX_STEP_MS, options))
     }

@@ -1,5 +1,6 @@
 const fs = require('fs')
 const path = require('path')
+const vec3 = require('vec3')
 const { goals: { GoalNear } } = require('mineflayer-pathfinder')
 const {
   CONTAINER_HOUSE_SIZE,
@@ -11,6 +12,12 @@ const {
 const { sleep } = require('./time')
 
 const MEMORY_VERSION = 1
+const CARDINAL_DIRECTIONS = {
+  north: { x: 0, z: -1 },
+  south: { x: 0, z: 1 },
+  west: { x: -1, z: 0 },
+  east: { x: 1, z: 0 }
+}
 
 function distanceBetween (a, b) {
   if (typeof a?.distanceTo === 'function') return a.distanceTo(b)
@@ -28,6 +35,22 @@ function clonePosition (position) {
     y: position.y,
     z: position.z
   }
+}
+
+function sameBlockPosition (a, b) {
+  return Math.floor(a?.x) === Math.floor(b?.x) &&
+    Math.floor(a?.y) === Math.floor(b?.y) &&
+    Math.floor(a?.z) === Math.floor(b?.z)
+}
+
+function blockCenterPosition (block) {
+  return vec3(block.position.x + 0.5, block.position.y + 0.5, block.position.z + 0.5)
+}
+
+function entityEyePosition (bot) {
+  const position = bot.entity?.position
+  if (!position) return null
+  return vec3(position.x, position.y + (bot.entity.eyeHeight ?? 1.62), position.z)
 }
 
 function isContainerBlockName (name = '') {
@@ -317,11 +340,96 @@ function findNearbyContainerBlocks (bot, options = {}) {
 
 async function approachContainerBlock (bot, block, options = {}) {
   if (options.approachContainers === false) return true
-  if (!block?.position || typeof bot.pathfinder?.goto !== 'function') return true
-  const botPosition = bot.entity?.position
-  if (botPosition && distanceBetween(botPosition, block.position) <= (options.containerApproachDistance ?? 4)) return true
+  if (!block?.position) return false
 
-  await bot.pathfinder.goto(new GoalNear(block.position.x, block.position.y, block.position.z, options.range ?? 2))
+  const target = containerInteractionTarget(bot, block, options)
+  if (!target) return false
+  if (isAtContainerInteractionTarget(bot, target, options)) return true
+  if (typeof bot.pathfinder?.goto !== 'function') return true
+
+  await bot.pathfinder.goto(new GoalNear(target.x, target.y, target.z, options.containerApproachRange ?? 1))
+  return true
+}
+
+function containerFacing (block) {
+  const facing = block?._properties?.facing || block?.properties?.facing
+  return typeof facing === 'string' ? facing.toLowerCase() : null
+}
+
+function containerInteractionPoint (block, direction) {
+  return {
+    x: block.position.x + direction.x,
+    y: block.position.y,
+    z: block.position.z + direction.z
+  }
+}
+
+function containerInteractionTargets (bot, block) {
+  const facing = containerFacing(block)
+  const frontDirection = CARDINAL_DIRECTIONS[facing]
+  const directions = Object.values(CARDINAL_DIRECTIONS)
+  const botPosition = bot.entity?.position
+  const frontTarget = frontDirection ? containerInteractionPoint(block, frontDirection) : null
+  const targets = directions
+    .map(direction => containerInteractionPoint(block, direction))
+    .filter(target => !frontTarget || !sameBlockPosition(target, frontTarget))
+    .sort((a, b) => {
+      if (!botPosition) return 0
+      return distanceBetween(botPosition, a) - distanceBetween(botPosition, b)
+    })
+
+  return frontTarget ? [frontTarget, ...targets] : targets
+}
+
+function containerInteractionTarget (bot, block, options = {}) {
+  return containerInteractionTargets(bot, block, options)[0] || null
+}
+
+function isAtContainerInteractionTarget (bot, target, options = {}) {
+  const botPosition = bot.entity?.position
+  if (!botPosition || !target) return false
+  return distanceBetween(botPosition, target) <= (options.containerApproachRange ?? 1)
+}
+
+async function lookAtContainerBlock (bot, block) {
+  if (typeof bot.lookAt !== 'function') return true
+  await bot.lookAt(blockCenterPosition(block), true)
+  return true
+}
+
+function canSeeContainerBlock (bot, block, options = {}) {
+  if (options.checkContainerLineOfSight === false) return true
+  if (typeof bot.world?.raycast !== 'function') return true
+
+  const eye = entityEyePosition(bot)
+  if (!eye) return true
+  const center = blockCenterPosition(block)
+  const direction = center.minus(eye)
+  const range = Math.sqrt(
+    Math.pow(direction.x, 2) +
+    Math.pow(direction.y, 2) +
+    Math.pow(direction.z, 2)
+  )
+  if (range <= 0) return true
+
+  const hit = bot.world.raycast(eye, direction.scaled(1 / range), range + 0.25)
+  return !hit || sameBlockPosition(hit.position, block.position)
+}
+
+async function prepareContainerBlock (bot, block, options = {}) {
+  const debugLog = options.debugLog || (() => {})
+  const approached = await approachContainerBlock(bot, block, options)
+  if (!approached) return false
+
+  await lookAtContainerBlock(bot, block)
+  if (!canSeeContainerBlock(bot, block, options)) {
+    debugLog('container.blockedLineOfSight', {
+      block: block.name,
+      position: block.position
+    })
+    return false
+  }
+
   return true
 }
 
@@ -353,7 +461,7 @@ async function visitContainerBlocks (bot, blocks, options = {}, visitor) {
 
   rememberContainerBlocks(bot, blocks, options)
   for (const block of blocks) {
-    await approachContainerBlock(bot, block, options)
+    if (!await prepareContainerBlock(bot, block, options)) continue
     const container = await bot.openContainer(block)
     try {
       await waitForContainerInteraction(options, 'open')
@@ -381,7 +489,7 @@ async function visitKnownContainers (bot, blocks, options = {}, visitor) {
   if (typeof bot.openContainer !== 'function') return false
 
   for (const block of blocks) {
-    await approachContainerBlock(bot, block, options)
+    if (!await prepareContainerBlock(bot, block, options)) continue
     const container = await bot.openContainer(block)
     try {
       if (await visitor(container, block)) return true

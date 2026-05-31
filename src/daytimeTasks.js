@@ -1,8 +1,7 @@
+const { WOODCUTTING_TARGET_WOOD_COUNT } = require('./config')
 const { runFarmingTask } = require('./farming')
 const { runWildRoamingTask } = require('./wildRoaming')
 const { runWoodCuttingQuotaTask } = require('./woodcutting')
-
-const DAYTIME_WOODCUTTING_TARGET_WOOD_COUNT = 32
 
 function clonePosition (position) {
   if (!position) return null
@@ -42,7 +41,7 @@ function createDefaultDaytimeTasks () {
       name: 'Wood Cutting',
       run: (bot, options) => runWoodCuttingQuotaTask(bot, {
         ...options,
-        targetWoodCount: options.daytimeWoodTargetCount ?? DAYTIME_WOODCUTTING_TARGET_WOOD_COUNT
+        targetWoodCount: options.daytimeWoodTargetCount ?? WOODCUTTING_TARGET_WOOD_COUNT
       })
     },
     {

@@ -19,6 +19,7 @@ const {
   WOODCUTTING_POST_DIG_DELAY_MS,
   WOODCUTTING_ROAM_RADIUS,
   WOODCUTTING_SURVIVAL_REACH_DISTANCE,
+  WOODCUTTING_TARGET_WOOD_COUNT,
   WOODCUTTING_TREE_SEARCH_RADIUS
 } = require('./config')
 const {
@@ -27,6 +28,7 @@ const {
   rememberHouseAnchor,
   visitContainerBlocks
 } = require('./containers')
+const { rememberPlaceCoordinates } = require('./places')
 const { sleep } = require('./time')
 
 function isLogName (name = '') {
@@ -1055,6 +1057,7 @@ async function depositWoodAtHome (bot, options = {}) {
   if (isWoodcuttingStopped(bot, options)) return false
 
   const homeAnchor = rememberHouseAnchor(bot, bot.entity?.position, options)
+  rememberPlaceCoordinates(bot, 'home', homeAnchor || bot.entity?.position, options)
   const containerOptions = {
     ...options,
     houseOnly: options.houseOnly ?? true,
@@ -1113,7 +1116,10 @@ async function runWoodCuttingCycle (bot, options = {}) {
     return roamForTrees(bot, options)
   }
 
-  return cutTreeLog(bot, treeLog, options)
+  const cut = await cutTreeLog(bot, treeLog, options)
+  if (cut || isWoodcuttingStopped(bot, options)) return cut
+
+  return roamForTrees(bot, options)
 }
 
 function countWoodItems (bot) {
@@ -1132,7 +1138,7 @@ function woodcuttingLoopDelay (options, emptyCycles) {
 
 async function runWoodCuttingQuotaTask (bot, options = {}) {
   const debugLog = options.debugLog || (() => {})
-  const targetWoodCount = options.targetWoodCount ?? 256
+  const targetWoodCount = options.targetWoodCount ?? WOODCUTTING_TARGET_WOOD_COUNT
   const wait = options.sleep || sleep
   const cycle = options.runWoodCuttingCycle || runWoodCuttingCycle
   const deposit = options.depositWoodAtHome || depositWoodAtHome
@@ -1141,7 +1147,7 @@ async function runWoodCuttingQuotaTask (bot, options = {}) {
   let collected = 0
   let emptyCycles = 0
 
-  while (!bot._ended && !options.shouldStop?.() && collected < targetWoodCount) {
+  while (!bot._ended && !options.shouldStop?.() && collected < targetWoodCount && lastCount < targetWoodCount) {
     const before = woodCounter(bot)
     const ran = await cycle(bot, options)
     const after = woodCounter(bot)
@@ -1171,11 +1177,9 @@ async function runWoodCuttingQuotaTask (bot, options = {}) {
 }
 
 function startWoodCuttingAutomation (bot, options = {}) {
-  const wait = options.sleep || sleep
   const debugLog = options.debugLog || (() => {})
   const output = options.output || console.log
-  const loopDelayMs = options.loopDelayMs ?? WOODCUTTING_LOOP_DELAY_MS
-  const cycle = options.runWoodCuttingCycle || runWoodCuttingCycle
+  const quotaTask = options.runWoodCuttingQuotaTask || runWoodCuttingQuotaTask
   const externalShouldStop = options.shouldStop
   let stopped = false
   const shouldStop = () => stopped ||
@@ -1191,21 +1195,22 @@ function startWoodCuttingAutomation (bot, options = {}) {
   async function run () {
     output('Started wood cutting automation.')
     debugLog('automation.woodcutting.start')
-    for (;;) {
-      if (shouldStop()) break
-      try {
-        const result = await cycle(bot, activeOptions)
-        if (!result) {
-          output('Wood cutting automation task completed.')
-          break
-        }
-      } catch (err) {
-        output(`Wood cutting error: ${err.message}`)
-        debugLog('automation.woodcutting.error', { message: err.message, stack: err.stack })
-      }
-      if (shouldStop()) break
-      await wait(randomizedWoodcuttingDelayMs(loopDelayMs, activeOptions))
+    if (shouldStop()) {
+      debugLog('automation.woodcutting.stop')
+      return
     }
+
+    try {
+      const completed = await quotaTask(bot, {
+        ...activeOptions,
+        targetWoodCount: activeOptions.targetWoodCount ?? WOODCUTTING_TARGET_WOOD_COUNT
+      })
+      if (completed && !shouldStop()) output('Wood cutting automation task completed.')
+    } catch (err) {
+      output(`Wood cutting error: ${err.message}`)
+      debugLog('automation.woodcutting.error', { message: err.message, stack: err.stack })
+    }
+
     debugLog('automation.woodcutting.stop')
   }
 

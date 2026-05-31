@@ -12,6 +12,7 @@ const { attachDeathRecovery } = require('./deathRecovery')
 const { attachEventLogging } = require('./eventLogging')
 const { attachFollowController } = require('./follow')
 const { attachKnockbackPause } = require('./knockbackPause')
+const { startLogTerminal } = require('./logTerminal')
 const { attachNightSafety } = require('./nightSafety')
 const { closeViewer } = require('./viewer')
 
@@ -116,7 +117,10 @@ function createBot (options = buildBotOptions()) {
 
 function start () {
   try {
-    return createBot()
+    const logTerminal = startLogTerminal()
+    const bot = createBot()
+    if (bot) bot.__logTerminal = logTerminal
+    return bot
   } catch (err) {
     console.error(err.message)
     console.error('Usage: node bot.js <microsoft-account-email-or-identifier>')

@@ -13,6 +13,13 @@ const CROP_REPLANT_ITEMS = {
   nether_wart: 'nether_wart'
 }
 
+const FARMLAND_PLANT_ITEMS = [
+  'wheat_seeds',
+  'carrot',
+  'potato',
+  'beetroot_seeds'
+]
+
 const CROP_MATURE_AGES = {
   wheat: 7,
   carrots: 7,
@@ -52,6 +59,71 @@ function findReplantItem (bot, cropName) {
   return inventoryItems(bot).find(item => item.name === itemName) || null
 }
 
+function findFarmlandPlantItem (bot) {
+  return FARMLAND_PLANT_ITEMS
+    .map(itemName => inventoryItems(bot).find(item => item.name === itemName))
+    .find(Boolean) || null
+}
+
+function safeEnchantments (item, slot, debugLog = () => {}) {
+  if (!item) return []
+
+  let enchantments
+  try {
+    enchantments = item.enchants
+  } catch (err) {
+    debugLog('automation.farming.ignoredEnchantError', {
+      slot,
+      item: item.name,
+      message: err.message
+    })
+    return []
+  }
+
+  if (Array.isArray(enchantments)) return enchantments
+
+  debugLog('automation.farming.ignoredBadEnchantData', {
+    slot,
+    item: item.name,
+    type: typeof enchantments
+  })
+  return []
+}
+
+function safeDigTime (bot, block, debugLog = () => {}) {
+  const currentlyHeldItem = bot.heldItem
+  const enchantments = safeEnchantments(currentlyHeldItem, 'hand', debugLog)
+  const creative = bot.game?.gameMode === 'creative'
+
+  return block.digTime(
+    currentlyHeldItem?.type ?? null,
+    creative,
+    ['water', 'flowing_water'].includes(bot._getBlockAtEyeLevel?.()?.name),
+    !bot.entity?.onGround,
+    enchantments,
+    bot.entity?.effects || {}
+  )
+}
+
+async function digCropWithSafeEnchantments (bot, crop, debugLog = () => {}) {
+  const originalDigTime = bot.digTime
+  if (typeof originalDigTime !== 'function') {
+    await bot.dig(crop)
+    return
+  }
+
+  bot.digTime = target => safeDigTime(bot, target, debugLog)
+  try {
+    await bot.dig(crop)
+  } finally {
+    bot.digTime = originalDigTime
+  }
+}
+
+function isAirBlock (block) {
+  return !block || /^(air|cave_air|void_air)$/i.test(block.name || '')
+}
+
 function findMatureCrops (bot, options = {}) {
   if (typeof bot.findBlocks !== 'function') return []
 
@@ -66,6 +138,31 @@ function findMatureCrops (bot, options = {}) {
   return positions
     .map(position => bot.blockAt(position))
     .filter(Boolean)
+    .filter(block => !originPosition || distanceBetween(originPosition, block.position) <= searchRadius)
+    .sort((a, b) => distanceBetween(originPosition, a.position) - distanceBetween(originPosition, b.position))
+}
+
+function isPlantableFarmland (bot, block) {
+  if (block?.name !== 'farmland') return false
+  const aboveBlock = bot.blockAt?.(block.position.offset(0, 1, 0))
+  return isAirBlock(aboveBlock)
+}
+
+function findPlantableFarmland (bot, options = {}) {
+  if (typeof bot.findBlocks !== 'function') return []
+
+  const originPosition = options.originPosition || bot.entity?.position
+  const searchRadius = options.searchRadius ?? FARMING_SEARCH_RADIUS
+  const positions = bot.findBlocks({
+    matching: block => block?.name === 'farmland',
+    maxDistance: searchRadius,
+    count: options.farmlandCount ?? 128
+  })
+
+  return positions
+    .map(position => bot.blockAt(position))
+    .filter(Boolean)
+    .filter(block => isPlantableFarmland(bot, block))
     .filter(block => !originPosition || distanceBetween(originPosition, block.position) <= searchRadius)
     .sort((a, b) => distanceBetween(originPosition, a.position) - distanceBetween(originPosition, b.position))
 }
@@ -124,7 +221,7 @@ async function harvestAndReplantCrop (bot, crop, options = {}) {
   const referenceBlock = bot.blockAt(crop.position.offset(0, -1, 0))
 
   await goNearBlock(bot, crop)
-  await bot.dig(crop)
+  await digCropWithSafeEnchantments(bot, crop, debugLog)
   debugLog('automation.farming.harvest', {
     crop: crop.name,
     position: crop.position
@@ -141,11 +238,27 @@ async function harvestAndReplantCrop (bot, crop, options = {}) {
   return true
 }
 
+async function plantFarmlandPlot (bot, farmland, options = {}) {
+  const debugLog = options.debugLog || (() => {})
+  const plantItem = findFarmlandPlantItem(bot)
+  if (!plantItem || typeof bot.placeBlock !== 'function') return false
+
+  await goNearBlock(bot, farmland)
+  await bot.equip(plantItem, 'hand')
+  await bot.placeBlock(farmland, vec3(0, 1, 0))
+  debugLog('automation.farming.plant', {
+    item: plantItem.name,
+    plot: farmland.position
+  })
+  return true
+}
+
 async function runFarmingTask (bot, options = {}) {
   const debugLog = options.debugLog || (() => {})
   const attempted = new Set()
   const doorRetries = new Set()
   let harvested = 0
+  let planted = 0
 
   for (;;) {
     if (bot._ended || options.shouldStop?.()) break
@@ -190,14 +303,35 @@ async function runFarmingTask (bot, options = {}) {
     }
   }
 
-  debugLog('automation.farming.done', { harvested })
-  return harvested
+  const attemptedPlots = new Set()
+  for (;;) {
+    if (bot._ended || options.shouldStop?.()) break
+    if (!await waitForCombatToClear(bot, options)) break
+    const farmland = findPlantableFarmland(bot, options).find(candidate => !attemptedPlots.has(positionKey(candidate.position)))
+    if (!farmland) break
+    attemptedPlots.add(positionKey(farmland.position))
+
+    try {
+      if (await plantFarmlandPlot(bot, farmland, options)) planted++
+    } catch (err) {
+      debugLog('automation.farming.error', {
+        plot: farmland.position,
+        message: err.message
+      })
+      break
+    }
+  }
+
+  debugLog('automation.farming.done', { harvested, planted })
+  return harvested + planted
 }
 
 module.exports = {
+  findPlantableFarmland,
   findMatureCrops,
   FARMING_SEARCH_RADIUS,
   harvestAndReplantCrop,
   isMatureCrop,
+  plantFarmlandPlot,
   runFarmingTask
 }

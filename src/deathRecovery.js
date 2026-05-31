@@ -3,6 +3,7 @@ const {
   RESPAWN_HOME_DELAY_MS,
   WOODCUTTING_HOME_COMMAND
 } = require('./config')
+const { rememberPlaceCoordinates } = require('./places')
 const { sleep } = require('./time')
 
 function stopBotMovement (bot) {
@@ -49,6 +50,8 @@ function attachDeathRecovery (bot, options = {}) {
     if (!bot._ended) {
       bot.chat(homeCommand)
       debugLog('command.sent', { command: homeCommand, reason: 'death-recovery' })
+      await wait(options.homeRecordDelayMs ?? homeDelayMs)
+      if (!bot._ended) rememberPlaceCoordinates(bot, 'home', bot.entity?.position, options)
     }
   })
 

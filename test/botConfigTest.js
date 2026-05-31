@@ -495,6 +495,29 @@ describe('holocraft bot config', function () {
     assert.deepStrictEqual(lookPoints[lookPoints.length - 1], { x: 3, y: 1.8, z: 0 })
   })
 
+  it('passes Vec3-compatible aim points to Mineflayer lookAt', async () => {
+    const { runCombatTick } = require('../bot')
+    const events = []
+    const target = combatTarget('zombie', 3)
+    const bot = combatBot([{ name: 'diamond_sword' }], events)
+    bot.lookAt = async (point, force) => {
+      assert.strictEqual(typeof point.minus, 'function')
+      events.push(['lookAt', force, { x: point.x, y: point.y, z: point.z }])
+      bot.entity.yaw = Math.atan2(-point.x, -point.z)
+      bot.entity.pitch = Math.atan2(point.y - bot.entity.eyeHeight, Math.sqrt(point.x * point.x + point.z * point.z))
+    }
+
+    const action = await runCombatTick(bot, {
+      targetFinder: () => target,
+      randomInt: (min, max) => max,
+      sleep: async () => {},
+      debugLog: () => {}
+    })
+
+    assert.strictEqual(action.type, 'sword')
+    assert.strictEqual(events.filter(event => event[0] === 'lookAt').length, 5)
+  })
+
   it('does not attack when the bot is not facing the mob after aiming', async () => {
     const { runCombatTick } = require('../bot')
     const events = []
@@ -1630,19 +1653,22 @@ describe('holocraft bot config', function () {
     const output = []
     const bot = blockBot([])
     let runCount = 0
+    let targetWoodCount = null
 
     startWoodCuttingAutomation(bot, {
       output: message => output.push(message),
       debugLog: () => {},
       sleep: () => Promise.resolve(),
-      runWoodCuttingCycle: async () => {
+      runWoodCuttingQuotaTask: async (taskBot, taskOptions) => {
         runCount++
-        bot._ended = true
+        targetWoodCount = taskOptions.targetWoodCount
+        return true
       }
     })
     await Promise.resolve()
 
     assert.strictEqual(runCount, 1)
+    assert.strictEqual(targetWoodCount, 32)
     assert(output.some(message => message.includes('Started wood cutting automation.')))
     assert(output.some(message => message.includes('Wood cutting automation task completed.')))
   })
@@ -2647,6 +2673,44 @@ describe('holocraft bot config', function () {
     ])
   })
 
+  it('clears several leaf blockers before giving up on a hidden tree log', async () => {
+    const { cutTreeLog } = require('../bot')
+    const events = []
+    let leavesCleared = 0
+    const treeLog = block('oak_log', 0, 64, 0)
+    const bot = blockBot([
+      treeLog,
+      block('oak_leaves', 0, 65, 0),
+      block('oak_leaves', 1, 65, 0),
+      block('oak_leaves', -1, 65, 0),
+      block('oak_leaves', 0, 65, 1)
+    ], events)
+    bot.pathfinder = {
+      goto: async () => {}
+    }
+    bot.dig = async (target, forceLook, digFace) => {
+      if (target.name === 'oak_log' && leavesCleared < 4) {
+        throw new Error('Block not in view')
+      }
+      events.push(['dig', target.name, forceLook, digFace])
+      if (target.name === 'oak_leaves') leavesCleared++
+    }
+
+    const cut = await cutTreeLog(bot, treeLog, {
+      debugLog: () => {},
+      sleep: async () => {}
+    })
+
+    assert.strictEqual(cut, true)
+    assert.deepStrictEqual(events, [
+      ['dig', 'oak_leaves', true, 'raycast'],
+      ['dig', 'oak_leaves', true, 'raycast'],
+      ['dig', 'oak_leaves', true, 'raycast'],
+      ['dig', 'oak_leaves', true, 'raycast'],
+      ['dig', 'oak_log', true, 'raycast']
+    ])
+  })
+
   it('temporarily skips unreachable logs when no scaffold block is available', async () => {
     const { runWoodCuttingCycle } = require('../bot')
     const events = []
@@ -2667,19 +2731,13 @@ describe('holocraft bot config', function () {
       roamTarget: combatPosition(8, 64, 0),
       sleep: async () => {}
     })
-    await runWoodCuttingCycle(bot, {
-      debugLog: (event, data) => entries.push({ event, data }),
-      now: () => 1000,
-      roamTarget: combatPosition(8, 64, 0),
-      sleep: async () => {}
-    })
 
     assert.deepStrictEqual(events, [
       ['goto', 'GoalNearXZ', 0, undefined, 0],
       ['goto', 'GoalNearXZ', 8, undefined, 0]
     ])
     assert(entries.some(entry => entry.event === 'automation.woodcutting.ignoreLog'))
-    assert(entries.some(entry => entry.event === 'automation.woodcutting.noTree'))
+    assert(entries.some(entry => entry.event === 'automation.woodcutting.roam'))
   })
 
   it('temporarily skips logs after repeated path timeout while cutting', async () => {
@@ -2708,13 +2766,6 @@ describe('holocraft bot config', function () {
       roamTarget: combatPosition(8, 64, 0),
       sleep: async () => {}
     })
-    await runWoodCuttingCycle(bot, {
-      debugLog: (event, data) => entries.push({ event, data }),
-      now: () => 1000,
-      pathTimeoutMs: 1,
-      roamTarget: combatPosition(8, 64, 0),
-      sleep: async () => {}
-    })
 
     assert.deepStrictEqual(events, [
       ['goto', 'GoalNearXZ', 0, undefined, 0],
@@ -2725,7 +2776,40 @@ describe('holocraft bot config', function () {
       entry.event === 'automation.woodcutting.ignoreLog' &&
       entry.data.reason === 'path-failed'
     ))
-    assert(entries.some(entry => entry.event === 'automation.woodcutting.noTree'))
+    assert(entries.some(entry => entry.event === 'automation.woodcutting.roam'))
+  })
+
+  it('roams after a failed tree path instead of ending the wood cutting cycle', async () => {
+    const { runWoodCuttingCycle } = require('../bot')
+    const events = []
+    const treeLog = block('oak_log', 0, 64, 0)
+    let calls = 0
+    const bot = blockBot([
+      treeLog,
+      block('oak_leaves', 1, 66, 0)
+    ], events)
+    bot.pathfinder = {
+      goto: async goal => {
+        calls++
+        events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+        if (calls === 1) throw new Error('No path to the goal!')
+      },
+      setGoal: goal => events.push(['setGoal', goal])
+    }
+
+    const ran = await runWoodCuttingCycle(bot, {
+      debugLog: () => {},
+      now: () => 1000,
+      roamTarget: combatPosition(8, 64, 0),
+      sleep: async () => {}
+    })
+
+    assert.strictEqual(ran, true)
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalGetToBlock', 0, 64, 0],
+      ['setGoal', null],
+      ['goto', 'GoalNearXZ', 8, undefined, 0]
+    ])
   })
 
   it('temporarily skips the rest of a failed trunk column', async () => {
@@ -2755,12 +2839,6 @@ describe('holocraft bot config', function () {
       roamTarget: combatPosition(8, 64, 0),
       sleep: async () => {}
     })
-    await runWoodCuttingCycle(bot, {
-      debugLog: (event, data) => entries.push({ event, data }),
-      now: () => 1000,
-      roamTarget: combatPosition(8, 64, 0),
-      sleep: async () => {}
-    })
 
     assert.deepStrictEqual(events, [
       ['goto', 'GoalGetToBlock', 0, 64, 0],
@@ -2768,7 +2846,7 @@ describe('holocraft bot config', function () {
       ['goto', 'GoalNearXZ', 8, undefined, 0]
     ])
     assert.strictEqual(entries.filter(entry => entry.event === 'automation.woodcutting.ignoreLog').length, 1)
-    assert(entries.some(entry => entry.event === 'automation.woodcutting.noTree'))
+    assert(entries.some(entry => entry.event === 'automation.woodcutting.roam'))
   })
 
   it('randomizes wood cutting action, post-dig, and drop pickup waits', async () => {
@@ -2855,6 +2933,7 @@ describe('holocraft bot config', function () {
       containerInteractionDelayMs: 0,
       containerMemoryPath: tempContainerMemoryPath(),
       debugLog: () => {},
+      placesPath: tempPlacesPath(),
       randomInt: (min, max) => max,
       sleep: async ms => sleeps.push(ms)
     })
@@ -3081,6 +3160,7 @@ describe('holocraft bot config', function () {
 
     await depositWoodAtHome(bot, {
       containerMemoryPath: tempContainerMemoryPath(),
+      placesPath: tempPlacesPath(),
       sleep: async () => {},
       debugLog: () => {}
     })
@@ -3090,6 +3170,33 @@ describe('holocraft bot config', function () {
       ['deposit', 17, 12],
       ['close']
     ])
+  })
+
+  it('records the home coordinate after using the home teleport command', async () => {
+    const { depositWoodAtHome, readPlaceCoordinates } = require('../bot')
+    const events = []
+    const placesPath = tempPlacesPath()
+    const bot = blockBot([], events)
+    bot.entity.position = combatPosition(7, 64, 9)
+    bot.chat = command => events.push(['chat', command])
+    bot.inventory.items = () => [{ name: 'oak_log', type: 17, count: 4 }]
+
+    const deposited = await depositWoodAtHome(bot, {
+      containerMemoryPath: tempContainerMemoryPath(),
+      debugLog: () => {},
+      placesPath,
+      sleep: async () => {}
+    })
+
+    assert.strictEqual(deposited, false)
+    assert.deepStrictEqual(events, [
+      ['chat', '/home home']
+    ])
+    assert.deepStrictEqual(readPlaceCoordinates('home', { placesPath }).position, {
+      x: 7,
+      y: 64,
+      z: 9
+    })
   })
 
   it('tries another nearby chest when wood deposit chest is full', async () => {
@@ -3111,6 +3218,7 @@ describe('holocraft bot config', function () {
 
     await depositWoodAtHome(bot, {
       containerMemoryPath: tempContainerMemoryPath(),
+      placesPath: tempPlacesPath(),
       sleep: async () => {},
       debugLog: () => {}
     })
@@ -3160,6 +3268,7 @@ describe('holocraft bot config', function () {
     bot.sleep = async target => events.push(['sleepBed', target.name])
 
     await runNightSafetyCycle(bot, {
+      placesPath: tempPlacesPath(),
       sleep: async () => {},
       debugLog: () => {}
     })
@@ -3311,6 +3420,7 @@ describe('holocraft bot config', function () {
     bot.sleep = async () => events.push(['sleep'])
 
     const completed = await runNightSafetyCycle(bot, {
+      placesPath: tempPlacesPath(),
       sleep: async () => {},
       debugLog: () => {}
     })
@@ -3441,6 +3551,7 @@ describe('holocraft bot config', function () {
     bot.sleep = async () => events.push(['sleep'])
 
     const completed = await runNightSafetyCycle(bot, {
+      placesPath: tempPlacesPath(),
       sleep: async () => {},
       debugLog: () => {}
     })
@@ -3536,6 +3647,81 @@ describe('holocraft bot config', function () {
       ['dig', 'wheat'],
       ['equip', 'wheat_seeds', 'hand'],
       ['placeBlock', 'farmland', 0, 1, 0]
+    ])
+  })
+
+  it('sanitizes held item enchant data before harvesting crops', async () => {
+    const { runFarmingTask } = require('../bot')
+    const events = []
+    const wheat = {
+      ...block('wheat', 1, 64, 0),
+      _properties: { age: 7 },
+      digTime: (type, creative, inWater, notOnGround, enchantments) => {
+        events.push(['digTime', enchantments])
+        enchantments.concat([])
+        return 100
+      }
+    }
+    const farmland = block('farmland', 1, 63, 0)
+    const weirdSword = { name: 'diamond_sword', enchants: { sharpness: 5 } }
+    const wheatSeeds = { name: 'wheat_seeds', type: 295, count: 4 }
+    const bot = blockBot([wheat, farmland], events)
+    bot.heldItem = weirdSword
+    bot.inventory.items = () => [wheatSeeds]
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.x, goal.y, goal.z])
+    }
+    bot.digTime = target => target.digTime(null, false, false, false, bot.heldItem.enchants, {})
+    bot.dig = async target => {
+      bot.digTime(target)
+      events.push(['dig', target.name])
+    }
+    bot.placeBlock = async (reference, faceVector) => events.push(['placeBlock', reference.name, faceVector.x, faceVector.y, faceVector.z])
+
+    const harvested = await runFarmingTask(bot, {
+      originPosition: combatPosition(0, 64, 0),
+      debugLog: () => {}
+    })
+
+    assert.strictEqual(harvested, 1)
+    assert.deepStrictEqual(events, [
+      ['goto', 1, 64, 0],
+      ['digTime', []],
+      ['dig', 'wheat'],
+      ['equip', 'wheat_seeds', 'hand'],
+      ['placeBlock', 'farmland', 0, 1, 0]
+    ])
+  })
+
+  it('plants seeds into empty farmland plots', async () => {
+    const { runFarmingTask } = require('../bot')
+    const events = []
+    const emptyFarmland = block('farmland', 2, 63, 0)
+    const occupiedFarmland = block('farmland', 3, 63, 0)
+    const youngWheat = {
+      ...block('wheat', 3, 64, 0),
+      properties: { age: '2' }
+    }
+    const wheatSeeds = { name: 'wheat_seeds', type: 295, count: 4 }
+    const bot = blockBot([emptyFarmland, occupiedFarmland, youngWheat], events)
+    bot.inventory.items = () => [wheatSeeds]
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+    }
+    bot.placeBlock = async (reference, faceVector) => events.push(['placeBlock', reference.name, reference.position.x, faceVector.x, faceVector.y, faceVector.z])
+
+    const planted = await runFarmingTask(bot, {
+      debugLog: (event, data) => events.push(['debug', event, data?.plot?.x ?? data?.planted]),
+      sleep: async () => {}
+    })
+
+    assert.strictEqual(planted, 1)
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalNear', 2, 63, 0],
+      ['equip', 'wheat_seeds', 'hand'],
+      ['placeBlock', 'farmland', 2, 0, 1, 0],
+      ['debug', 'automation.farming.plant', 2],
+      ['debug', 'automation.farming.done', 1]
     ])
   })
 
@@ -3651,6 +3837,54 @@ describe('holocraft bot config', function () {
     ])
   })
 
+  it('uses 32 wood as the default wood cutting quota', async () => {
+    const { runWoodCuttingQuotaTask } = require('../bot')
+    const events = []
+    const bot = blockBot([], events)
+    let woodCount = 0
+    let targetWoodCount = null
+
+    const completed = await runWoodCuttingQuotaTask(bot, {
+      debugLog: (event, data) => {
+        if (event === 'automation.woodcutting.quota.done') targetWoodCount = data.targetWoodCount
+      },
+      sleep: async () => {},
+      countWoodItems: () => woodCount,
+      runWoodCuttingCycle: async () => {
+        events.push(['woodCycle', woodCount])
+        woodCount += 32
+        return true
+      },
+      depositWoodAtHome: async () => events.push(['depositWood'])
+    })
+
+    assert.strictEqual(completed, true)
+    assert.strictEqual(targetWoodCount, 32)
+    assert.deepStrictEqual(events, [
+      ['woodCycle', 0],
+      ['depositWood']
+    ])
+  })
+
+  it('does not cut another tree when already holding the wood cutting quota', async () => {
+    const { runWoodCuttingQuotaTask } = require('../bot')
+    const events = []
+    const bot = blockBot([], events)
+
+    const completed = await runWoodCuttingQuotaTask(bot, {
+      debugLog: () => {},
+      sleep: async () => {},
+      countWoodItems: () => 32,
+      runWoodCuttingCycle: async () => events.push(['woodCycle']),
+      depositWoodAtHome: async () => events.push(['depositWood'])
+    })
+
+    assert.strictEqual(completed, true)
+    assert.deepStrictEqual(events, [
+      ['depositWood']
+    ])
+  })
+
   it('backs off after repeated empty wood cutting cycles', async () => {
     const { runWoodCuttingQuotaTask } = require('../bot')
     const events = []
@@ -3728,6 +3962,7 @@ describe('holocraft bot config', function () {
     const attacked = await runWildRoamingTask(bot, {
       originPosition: combatPosition(0, 64, 0),
       minimumHuntDistance: 100,
+      placesPath: false,
       debugLog: () => {},
       sleep: async () => {}
     })
@@ -3735,8 +3970,123 @@ describe('holocraft bot config', function () {
     assert.strictEqual(attacked, true)
     assert.deepStrictEqual(events, [
       ['goto', 120, 64, 0],
+      ['lookAt', true, { x: 120, y: 64.7, z: 0 }],
       ['equip', 'iron_sword', 'hand'],
       ['attack', 'chicken']
+    ])
+  })
+
+  it('uses saved home coordinates to protect passive mobs near the house', async () => {
+    const { rememberPlaceCoordinates, runWildRoamingTask } = require('../bot')
+    const events = []
+    const placesPath = tempPlacesPath()
+    const cowNearHome = {
+      type: 'mob',
+      name: 'cow',
+      position: combatPosition(20, 64, 0)
+    }
+    const bot = combatBot([{ name: 'iron_sword' }], events)
+    bot.entity.position = combatPosition(200, 64, 0)
+    bot.entities = { 1: cowNearHome }
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z]),
+      setGoal: goal => events.push(['setGoal', goal])
+    }
+
+    rememberPlaceCoordinates(bot, 'home', combatPosition(0, 64, 0), {
+      placesPath
+    })
+    const ran = await runWildRoamingTask(bot, {
+      debugLog: (event, data) => events.push(['debug', event, data?.target || data?.name]),
+      originPosition: combatPosition(200, 64, 0),
+      placesPath,
+      random: () => 0,
+      sleep: async () => {}
+    })
+
+    assert.strictEqual(ran, true)
+    assert.deepStrictEqual(events, [
+      ['debug', 'automation.wildRoaming.protectedMob', 'cow'],
+      ['goto', 'GoalNearXZ', 220, undefined, 0],
+      ['debug', 'automation.wildRoaming.roam', undefined]
+    ])
+  })
+
+  it('roams farther away from the saved home each time', async () => {
+    const { rememberPlaceCoordinates, runWildRoamingTask } = require('../bot')
+    const events = []
+    const placesPath = tempPlacesPath()
+    const bot = combatBot([], events)
+    bot.entity.position = combatPosition(0, 64, 0)
+    bot.entities = {}
+    bot.pathfinder = {
+      goto: async goal => {
+        events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+        bot.entity.position = combatPosition(goal.x, 64, goal.z)
+      }
+    }
+
+    rememberPlaceCoordinates(bot, 'home', combatPosition(0, 64, 0), {
+      placesPath
+    })
+    await runWildRoamingTask(bot, {
+      debugLog: (event, data) => events.push(['debug', event, data?.distanceFromHome]),
+      minimumHuntDistance: 100,
+      placesPath,
+      random: () => 0,
+      roamRadius: 20,
+      sleep: async () => {}
+    })
+    await runWildRoamingTask(bot, {
+      debugLog: (event, data) => events.push(['debug', event, data?.distanceFromHome]),
+      minimumHuntDistance: 100,
+      placesPath,
+      random: () => 0,
+      roamRadius: 20,
+      sleep: async () => {}
+    })
+
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalNearXZ', 120, undefined, 0],
+      ['debug', 'automation.wildRoaming.roam', 120],
+      ['goto', 'GoalNearXZ', 140, undefined, 0],
+      ['debug', 'automation.wildRoaming.roam', 140]
+    ])
+  })
+
+  it('does not attack passive mobs through walls while wild roaming', async () => {
+    const { runWildRoamingTask } = require('../bot')
+    const events = []
+    const cow = {
+      type: 'mob',
+      name: 'cow',
+      position: combatPosition(120, 64, 0),
+      height: 1.4
+    }
+    const bot = combatBot([{ name: 'iron_sword' }], events)
+    bot.entity.position = combatPosition(0, 64, 0)
+    bot.entities = { 1: cow }
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z]),
+      setGoal: goal => events.push(['setGoal', goal])
+    }
+    bot.lookAt = async (point, force) => events.push(['lookAt', point.x, point.y, point.z, force])
+    bot.world = {
+      raycast: () => block('stone', 60, 64, 0)
+    }
+
+    const attacked = await runWildRoamingTask(bot, {
+      debugLog: (event, data) => events.push(['debug', event, data?.blocker || data?.target]),
+      minimumHuntDistance: 100,
+      originPosition: combatPosition(0, 64, 0),
+      sleep: async () => {}
+    })
+
+    assert.strictEqual(attacked, false)
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalNear', 120, 64, 0],
+      ['lookAt', 120, 64.7, 0, true],
+      ['debug', 'automation.wildRoaming.blockedLineOfSight', 'stone']
     ])
   })
 
@@ -3776,6 +4126,7 @@ describe('holocraft bot config', function () {
     assert.strictEqual(secondRun, true)
     assert.deepStrictEqual(events, [
       ['goto', 'GoalNear', 120, 64, 0],
+      ['lookAt', true, { x: 120, y: 64.7, z: 0 }],
       ['equip', 'iron_sword', 'hand'],
       ['attack', 'sheep'],
       ['debug', 'automation.wildRoaming.attack', 'sheep'],
@@ -4250,6 +4601,71 @@ describe('holocraft bot config', function () {
     ])
   })
 
+  it('walks to the container front and looks at it before opening', async () => {
+    const { visitNearbyContainers } = require('../bot')
+    const events = []
+    const chestBlock = block('chest', 1, 64, 0)
+    chestBlock.properties = { facing: 'east' }
+    const bot = blockBot([chestBlock], events)
+    bot.pathfinder = {
+      goto: async goal => {
+        events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+        bot.entity.position = combatPosition(goal.x, goal.y, goal.z)
+      }
+    }
+    bot.lookAt = async (point, force) => events.push(['lookAt', point.x, point.y, point.z, force])
+    bot.openContainer = async target => {
+      events.push(['openContainer', target.position.x])
+      return {
+        containerItems: () => [],
+        close: () => events.push(['close', target.position.x])
+      }
+    }
+
+    const visited = await visitNearbyContainers(bot, {
+      containerInteractionDelayMs: 0,
+      containerMemoryPath: tempContainerMemoryPath()
+    }, async () => true)
+
+    assert.strictEqual(visited, true)
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalNear', 2, 64, 0],
+      ['lookAt', 1.5, 64.5, 0.5, true],
+      ['openContainer', 1],
+      ['close', 1]
+    ])
+  })
+
+  it('does not open a container when line of sight is blocked', async () => {
+    const { visitNearbyContainers } = require('../bot')
+    const events = []
+    const chestBlock = block('chest', 1, 64, 0)
+    const bot = blockBot([chestBlock], events)
+    bot.lookAt = async (point, force) => events.push(['lookAt', point.x, point.y, point.z, force])
+    bot.world = {
+      raycast: () => block('stone', 0, 64, 0)
+    }
+    bot.openContainer = async target => {
+      events.push(['openContainer', target.position.x])
+      return {
+        containerItems: () => [],
+        close: () => events.push(['close', target.position.x])
+      }
+    }
+
+    const visited = await visitNearbyContainers(bot, {
+      containerInteractionDelayMs: 0,
+      containerMemoryPath: tempContainerMemoryPath(),
+      debugLog: (event, data) => events.push(['debug', event, data?.block])
+    }, async () => true)
+
+    assert.strictEqual(visited, false)
+    assert.deepStrictEqual(events, [
+      ['lookAt', 1.5, 64.5, 0.5, true],
+      ['debug', 'container.blockedLineOfSight', 'chest']
+    ])
+  })
+
   it('wakes up during the day even when gear is already complete', async () => {
     const { runDayGearCycle } = require('../bot')
     const events = []
@@ -4582,6 +4998,7 @@ describe('holocraft bot config', function () {
     bot.clearControlStates = () => events.push(['clearControlStates'])
 
     attachDeathRecovery(bot, {
+      placesPath: tempPlacesPath(),
       sleep: async () => {},
       debugLog: () => {}
     })
@@ -4813,6 +5230,95 @@ describe('holocraft bot config', function () {
     assert.deepStrictEqual(entry.data, { hello: 'world' })
   })
 
+  it('builds a Windows popup terminal command for the log viewer', () => {
+    const { buildWindowsLogTerminalArgs } = require('../bot')
+
+    const args = buildWindowsLogTerminalArgs({
+      nodePath: 'C:\\Program Files\\nodejs\\node.exe',
+      parentPid: 1234,
+      viewerScriptPath: 'C:\\bot\\src\\logViewer.js',
+      logPath: 'C:\\bot\\logs\\bot-debug.log'
+    })
+
+    assert.deepStrictEqual(args, [
+      '/c',
+      'start',
+      'Mineflayer Bot Logs',
+      'C:\\Program Files\\nodejs\\node.exe',
+      'C:\\bot\\src\\logViewer.js',
+      '--parent-pid',
+      '1234',
+      '--log-path',
+      'C:\\bot\\logs\\bot-debug.log'
+    ])
+  })
+
+  it('starts the log terminal on Windows and can be disabled from the environment', () => {
+    const { shouldStartLogTerminal, startLogTerminal } = require('../bot')
+    const calls = []
+    const child = {
+      unref: () => calls.push(['unref'])
+    }
+
+    assert.strictEqual(shouldStartLogTerminal({
+      platform: 'win32',
+      env: {}
+    }), true)
+    assert.strictEqual(shouldStartLogTerminal({
+      platform: 'linux',
+      env: {}
+    }), false)
+    assert.strictEqual(shouldStartLogTerminal({
+      platform: 'win32',
+      env: { MINEFLAYER_LOG_TERMINAL: '0' }
+    }), false)
+
+    const result = startLogTerminal({
+      logPath: 'C:\\bot\\logs\\bot-debug.log',
+      nodePath: 'C:\\node\\node.exe',
+      parentPid: 1234,
+      platform: 'win32',
+      spawn: (command, args, options) => {
+        calls.push(['spawn', command, args, options.detached, options.windowsHide])
+        return child
+      },
+      viewerScriptPath: 'C:\\bot\\src\\logViewer.js'
+    })
+
+    assert.strictEqual(result, child)
+    assert.strictEqual(calls[0][0], 'spawn')
+    assert.strictEqual(calls[0][1], 'cmd.exe')
+    assert.strictEqual(calls[0][3], true)
+    assert.strictEqual(calls[0][4], false)
+    assert.deepStrictEqual(calls[1], ['unref'])
+  })
+
+  it('formats and tails debug log lines for the popup log viewer', () => {
+    const { formatDebugLogLine, readNewLogLines } = require('../bot')
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-log-viewer-'))
+    const logPath = path.join(tempDir, 'bot-debug.log')
+    const output = []
+    const state = {
+      partial: '',
+      position: 0
+    }
+
+    assert.strictEqual(
+      formatDebugLogLine('{"time":"2026-05-31T05:00:01.000Z","event":"automation.start","data":{"name":"Farming"}}'),
+      '[05:00:01] automation.start {"name":"Farming"}'
+    )
+
+    fs.writeFileSync(logPath, '{"time":"2026-05-31T05:00:02.000Z","event":"nightSafety.wake","data":{}}\n')
+    readNewLogLines(state, {
+      logPath,
+      output: line => output.push(line)
+    })
+
+    assert.deepStrictEqual(output, [
+      '[05:00:02] nightSafety.wake'
+    ])
+  })
+
   it('logs homes menu details when opening homes', async () => {
     const { openHomesMenu } = require('../bot')
     const bot = new EventEmitter()
@@ -4978,6 +5484,10 @@ function sequenceRandom (values) {
 
 function tempContainerMemoryPath () {
   return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'container-memory-')), 'container-memory.txt')
+}
+
+function tempPlacesPath () {
+  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'places-')), 'places.txt')
 }
 
 function blockBot (blocks = [], events = []) {
