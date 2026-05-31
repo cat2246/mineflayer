@@ -226,6 +226,86 @@ for (const supportedVersion of mineflayer.testedVersions) {
         })
       })
     })
+    it('updates entity velocity from velocity packet', (done) => {
+      const usesLpVec3Velocity = registry.protocol.play.toClient.types.packet_entity_velocity[1]
+        .some(field => field.name === 'velocity' && field.type === 'lpVec3')
+      const packetVelocity = usesLpVec3Velocity
+        ? { x: 1, y: 0.5, z: -0.25 }
+        : { x: 8000, y: 4000, z: -2000 }
+
+      bot.once('entitySpawn', (entity) => {
+        if (entity.id !== 8) return
+        setTimeout(() => {
+          assert(Math.abs(entity.velocity.x - 1) < 0.0001)
+          assert(Math.abs(entity.velocity.y - 0.5) < 0.0001)
+          assert(Math.abs(entity.velocity.z + 0.25) < 0.0001)
+          done()
+        }, 50)
+      })
+
+      server.on('playerJoin', (client) => {
+        client.write('login', bot.test.generateLoginPacket())
+        const entities = bot.registry.entitiesByName
+        const creeperId = entities.creeper ? entities.creeper.id : entities.Creeper.id
+        client.write(bot.registry.supportFeature('consolidatedEntitySpawnPacket') ? 'spawn_entity' : 'spawn_entity_living', {
+          entityId: 8,
+          entityUUID: '00112233-4455-6677-8899-aabbccddeeff',
+          objectUUID: '00112233-4455-6677-8899-aabbccddeeff',
+          type: creeperId,
+          x: 10,
+          y: 11,
+          z: 12,
+          yaw: 13,
+          pitch: 14,
+          headPitch: 14,
+          velocity: { x: 0, y: 0, z: 0 },
+          metadata: []
+        })
+        client.write('entity_velocity', {
+          entityId: 8,
+          velocity: packetVelocity
+        })
+      })
+    })
+    it('sets spawned entity velocity from spawn packet', (done) => {
+      const spawnPacketName = bot.registry.supportFeature('consolidatedEntitySpawnPacket') ? 'spawn_entity' : 'spawn_entity_living'
+      const spawnPacketTypeName = `packet_${spawnPacketName}`
+      const usesLpVec3Velocity = registry.protocol.play.toClient.types[spawnPacketTypeName][1]
+        .some(field => field.name === 'velocity' && field.type === 'lpVec3')
+      const spawnVelocity = usesLpVec3Velocity
+        ? { x: 1, y: 0.5, z: -0.25 }
+        : { x: 8000, y: 4000, z: -2000 }
+
+      function onEntitySpawn (entity) {
+        if (entity.id !== 9) return
+        bot.off('entitySpawn', onEntitySpawn)
+        assert(Math.abs(entity.velocity.x - 1) < 0.0001)
+        assert(Math.abs(entity.velocity.y - 0.5) < 0.0001)
+        assert(Math.abs(entity.velocity.z + 0.25) < 0.0001)
+        done()
+      }
+      bot.on('entitySpawn', onEntitySpawn)
+
+      server.on('playerJoin', (client) => {
+        client.write('login', bot.test.generateLoginPacket())
+        const entities = bot.registry.entitiesByName
+        const creeperId = entities.creeper ? entities.creeper.id : entities.Creeper.id
+        client.write(spawnPacketName, {
+          entityId: 9,
+          entityUUID: '00112233-4455-6677-8899-aabbccddeeff',
+          objectUUID: '00112233-4455-6677-8899-aabbccddeeff',
+          type: creeperId,
+          x: 10,
+          y: 11,
+          z: 12,
+          yaw: 13,
+          pitch: 14,
+          headPitch: 14,
+          velocity: spawnVelocity,
+          metadata: []
+        })
+      })
+    })
     it('blockAt', (done) => {
       const pos = vec3(1, 65, 1)
       const goldId = bot.registry.blocksByName.gold_block.id

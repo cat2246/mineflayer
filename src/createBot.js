@@ -15,6 +15,8 @@ const { attachKnockbackPause } = require('./knockbackPause')
 const { attachNightSafety } = require('./nightSafety')
 const { closeViewer } = require('./viewer')
 
+const RECONNECT_DELAY_MS = 180000
+
 function configureConservativeMovements (movements) {
   movements.canDig = false
   movements.allowSprinting = false
@@ -45,6 +47,7 @@ function attachShutdownHandlers (bot, signals = ['SIGINT', 'SIGTERM']) {
   function shutdown () {
     if (shuttingDown) return
     shuttingDown = true
+    bot.__manualShutdown = true
     closeViewer(bot)
     bot.quit()
   }
@@ -52,6 +55,30 @@ function attachShutdownHandlers (bot, signals = ['SIGINT', 'SIGTERM']) {
   for (const signal of signals) {
     process.once(signal, shutdown)
   }
+}
+
+function attachReconnectHandler (bot, options = {}) {
+  const reconnectDelayMs = options.reconnectDelayMs ?? RECONNECT_DELAY_MS
+  const reconnect = options.reconnect
+  const debugLog = options.debugLog || (() => {})
+  const setReconnectTimeout = options.setTimeout || setTimeout
+  let scheduled = false
+
+  bot.once('end', () => {
+    if (bot.__manualShutdown) {
+      debugLog('bot.reconnect.skipped', { reason: 'manual-shutdown' })
+      return
+    }
+
+    if (scheduled) return
+    scheduled = true
+    debugLog('bot.reconnect.scheduled', { reconnectDelayMs })
+    const timer = setReconnectTimeout(() => {
+      scheduled = false
+      if (typeof reconnect === 'function') reconnect()
+    }, reconnectDelayMs)
+    if (typeof timer?.unref === 'function') timer.unref()
+  })
 }
 
 function createBot (options = buildBotOptions()) {
@@ -79,6 +106,10 @@ function createBot (options = buildBotOptions()) {
   startConsole(bot, { debugLog, automationManager, followController, knockbackController, nightSafetyController })
   attachCombat(bot, { debugLog })
   attachAiChat(bot, { debugLog })
+  attachReconnectHandler(bot, {
+    debugLog,
+    reconnect: () => createBot(options)
+  })
   attachShutdownHandlers(bot)
   return bot
 }
@@ -95,6 +126,7 @@ function start () {
 }
 
 module.exports = {
+  attachReconnectHandler,
   attachShutdownHandlers,
   configureConservativeMovements,
   createBot,

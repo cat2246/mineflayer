@@ -112,6 +112,55 @@ describe('holocraft bot config', function () {
 
     assert.strictEqual(bot.quitCalls, 1)
     assert.strictEqual(bot.viewer.closeCalls, 1)
+    assert.strictEqual(bot.__manualShutdown, true)
+  })
+
+  it('reconnects the bot three minutes after an unexpected disconnect', () => {
+    const { attachReconnectHandler } = require('../bot')
+    const events = []
+    const bot = new EventEmitter()
+
+    attachReconnectHandler(bot, {
+      reconnectDelayMs: 180000,
+      reconnect: () => events.push(['reconnect']),
+      debugLog: (event, data) => events.push(['debug', event, data]),
+      setTimeout: (callback, delayMs) => {
+        events.push(['setTimeout', delayMs])
+        callback()
+        return { unref: () => events.push(['unref']) }
+      }
+    })
+
+    bot.emit('end')
+    bot.emit('end')
+
+    assert.deepStrictEqual(events, [
+      ['debug', 'bot.reconnect.scheduled', { reconnectDelayMs: 180000 }],
+      ['setTimeout', 180000],
+      ['reconnect'],
+      ['unref']
+    ])
+  })
+
+  it('does not reconnect after an intentional shutdown', () => {
+    const { attachReconnectHandler } = require('../bot')
+    const events = []
+    const bot = new EventEmitter()
+    bot.__manualShutdown = true
+
+    attachReconnectHandler(bot, {
+      reconnect: () => events.push(['reconnect']),
+      debugLog: (event, data) => events.push(['debug', event, data]),
+      setTimeout: () => {
+        events.push(['setTimeout'])
+      }
+    })
+
+    bot.emit('end')
+
+    assert.deepStrictEqual(events, [
+      ['debug', 'bot.reconnect.skipped', { reason: 'manual-shutdown' }]
+    ])
   })
 
   it('starts prismarine-viewer with the bot and viewer options', async () => {
@@ -212,21 +261,28 @@ describe('holocraft bot config', function () {
     assert.deepStrictEqual(messages, ['/login PqOwIeUr0192'])
   })
 
-  it('logs into the server and joins Survival on spawn after starting the viewer', async () => {
+  it('logs into the server and enables physics before joining Survival on spawn', async () => {
     const { attachEventLogging } = require('../bot')
     const bot = new EventEmitter()
     const events = []
+    bot.physicsEnabled = false
+    bot.on('physicsEnabled', data => events.push(['physicsEnabled', data.spawnCount, bot.physicsEnabled]))
 
     attachEventLogging(bot, {
-      loginToServer: async () => events.push('loginToServer'),
-      joinSurvivalWorld: async () => events.push('joinSurvivalWorld'),
-      startViewer: () => events.push('startViewer')
+      loginToServer: async () => events.push(['loginToServer']),
+      joinSurvivalWorld: async () => events.push(['joinSurvivalWorld', bot.physicsEnabled]),
+      startViewer: () => events.push(['startViewer'])
     })
 
     bot.emit('spawn')
     await new Promise(resolve => setImmediate(resolve))
 
-    assert.deepStrictEqual(events, ['startViewer', 'loginToServer', 'joinSurvivalWorld'])
+    assert.deepStrictEqual(events, [
+      ['startViewer'],
+      ['loginToServer'],
+      ['physicsEnabled', 1, true],
+      ['joinSurvivalWorld', true]
+    ])
   })
 
   it('loads the pvp plugin with the non-deprecated physicsTick event', () => {
@@ -246,7 +302,7 @@ describe('holocraft bot config', function () {
     ])
   })
 
-  it('re-enables physics after joining Survival on the first spawn', async () => {
+  it('enables physics immediately before joining Survival on the first spawn', async () => {
     const { attachEventLogging } = require('../bot')
     const bot = new EventEmitter()
     const sleeps = []
@@ -264,18 +320,19 @@ describe('holocraft bot config', function () {
     bot.emit('spawn')
     await new Promise(resolve => setImmediate(resolve))
 
-    assert.deepStrictEqual(sleeps, [10000])
+    assert.deepStrictEqual(sleeps, [])
     assert.strictEqual(bot.physicsEnabled, true)
     assert.deepStrictEqual(events, [['physicsEnabled', 1]])
   })
 
-  it('keeps physics disabled on the lobby spawn', async () => {
+  it('does not use the delayed physics timer on the first spawn', async () => {
     const { attachEventLogging } = require('../bot')
     const bot = new EventEmitter()
     const sleeps = []
     bot.physicsEnabled = false
 
     attachEventLogging(bot, {
+      loginToServer: async () => {},
       joinSurvivalWorld: async () => {},
       sleep: async (ms) => sleeps.push(ms),
       startViewer: () => {}
@@ -285,7 +342,7 @@ describe('holocraft bot config', function () {
     await new Promise(resolve => setImmediate(resolve))
 
     assert.deepStrictEqual(sleeps, [])
-    assert.strictEqual(bot.physicsEnabled, false)
+    assert.strictEqual(bot.physicsEnabled, true)
   })
 
   it('re-enables physics 10 seconds after a later spawn', async () => {
@@ -627,9 +684,10 @@ describe('holocraft bot config', function () {
     ])
   })
 
-  it('adds fallback knockback when hurt arrives without server velocity', () => {
+  it('adds fallback knockback only after no server velocity arrives', () => {
     const { attachKnockbackPause } = require('../bot')
     const bot = new EventEmitter()
+    let fallbackTimer = null
     bot.entity = {
       id: 1,
       position: combatPosition(0, 64, 0),
@@ -648,12 +706,606 @@ describe('holocraft bot config', function () {
       pauseMs: 700,
       horizontalVelocity: 0.45,
       verticalVelocity: 0.35,
+      fallbackKnockbackDelayMs: 50,
+      setFallbackKnockbackTimeout: (callback, delayMs) => {
+        assert.strictEqual(delayMs, 50)
+        fallbackTimer = callback
+        return callback
+      },
       debugLog: () => {}
     })
     bot.emit('entityHurt', bot.entity, attacker)
 
+    assert.strictEqual(bot.entity.velocity.x, 0)
+    assert.strictEqual(bot.entity.velocity.y, 0)
+    assert.strictEqual(bot.entity.velocity.z, 0)
+    fallbackTimer()
+
     assert(bot.entity.velocity.x < -0.4)
     assert.strictEqual(bot.entity.velocity.y, 0.35)
+    assert.strictEqual(bot.entity.velocity.z, 0)
+  })
+
+  it('cancels fallback knockback when server velocity arrives', () => {
+    const { attachKnockbackPause } = require('../bot')
+    const bot = new EventEmitter()
+    bot._client = new EventEmitter()
+    let clearCount = 0
+    bot.entity = {
+      id: 1,
+      position: combatPosition(0, 64, 0),
+      velocity: {
+        x: 0,
+        y: 0,
+        z: 0
+      }
+    }
+    const attacker = {
+      position: combatPosition(1, 64, 0)
+    }
+
+    attachKnockbackPause(bot, {
+      now: () => 1000,
+      pauseMs: 700,
+      horizontalVelocity: 0.45,
+      verticalVelocity: 0.35,
+      setFallbackKnockbackTimeout: callback => callback,
+      clearFallbackKnockbackTimeout: () => { clearCount++ },
+      debugLog: () => {}
+    })
+    bot.emit('entityHurt', bot.entity, attacker)
+    bot.entity.velocity.x = -1
+    bot.entity.velocity.y = 0.8
+    bot.entity.velocity.z = 0.25
+    bot._client.emit('entity_velocity', {
+      entityId: 1,
+      velocity: { x: -1, y: 0.8, z: 0.25 }
+    })
+
+    assert.strictEqual(clearCount, 1)
+    assert.strictEqual(bot.entity.velocity.x, -1)
+    assert.strictEqual(bot.entity.velocity.y, 0.8)
+    assert.strictEqual(bot.entity.velocity.z, 0.25)
+  })
+
+  it('does not add fallback knockback for indirect burn damage', () => {
+    const { attachKnockbackPause } = require('../bot')
+    const bot = new EventEmitter()
+    bot.entity = {
+      id: 1,
+      position: combatPosition(0, 64, 0),
+      velocity: {
+        x: 0,
+        y: 0,
+        z: 0
+      }
+    }
+    const attacker = {
+      id: 2,
+      position: combatPosition(1, 64, 0)
+    }
+
+    attachKnockbackPause(bot, {
+      now: () => 1000,
+      pauseMs: 700,
+      horizontalVelocity: 0.45,
+      verticalVelocity: 0.35,
+      debugLog: () => {}
+    })
+    bot.emit('entityHurt', bot.entity, attacker, {
+      sourceCauseId: 3,
+      sourceDirectId: 0
+    })
+
+    assert.strictEqual(bot.__movementPausedUntil, undefined)
+    assert.strictEqual(bot.entity.velocity.x, 0)
+    assert.strictEqual(bot.entity.velocity.y, 0)
+    assert.strictEqual(bot.entity.velocity.z, 0)
+  })
+
+  it('does not pause movement for no-direct burn damage', () => {
+    const { attachKnockbackPause } = require('../bot')
+    const bot = new EventEmitter()
+    const events = []
+    bot.entity = {
+      id: 1,
+      position: combatPosition(0, 64, 0),
+      velocity: {
+        x: 0,
+        y: 0,
+        z: 0
+      }
+    }
+    bot.clearControlStates = () => events.push('clearControls')
+
+    attachKnockbackPause(bot, {
+      now: () => 1000,
+      pauseMs: 700,
+      debugLog: () => {}
+    })
+    bot.emit('entityHurt', bot.entity, null, {
+      sourceTypeId: 29,
+      sourceCauseId: 0,
+      sourceDirectId: 0
+    })
+
+    assert.strictEqual(bot.__movementPausedUntil, undefined)
+    assert.deepStrictEqual(events, [])
+  })
+
+  it('ignores self velocity packets caused by indirect burn damage', () => {
+    const { attachKnockbackPause } = require('../bot')
+    const bot = new EventEmitter()
+    bot._client = new EventEmitter()
+    bot.entity = {
+      id: 1,
+      position: combatPosition(0, 64, 0),
+      velocity: {
+        x: 0,
+        y: -0.0784,
+        z: 0
+      }
+    }
+    const attacker = {
+      id: 2,
+      position: combatPosition(1, 64, 0)
+    }
+
+    attachKnockbackPause(bot, {
+      now: () => 1000,
+      pauseMs: 700,
+      debugLog: () => {}
+    })
+    bot.emit('entityHurt', bot.entity, attacker, {
+      sourceCauseId: 3,
+      sourceDirectId: 0
+    })
+    bot.entity.velocity.x = 1
+    bot.entity.velocity.y = 0.99
+    bot.entity.velocity.z = 0.85
+    bot._client.emit('entity_velocity', {
+      entityId: 1,
+      velocity: { x: 1, y: 0.99, z: 0.85 }
+    })
+
+    assert.strictEqual(bot.entity.velocity.x, 0)
+    assert.strictEqual(bot.entity.velocity.y, -0.0784)
+    assert.strictEqual(bot.entity.velocity.z, 0)
+  })
+
+  it('ignores delayed self velocity packets caused by indirect burn damage', () => {
+    const { attachKnockbackPause } = require('../bot')
+    const bot = new EventEmitter()
+    bot._client = new EventEmitter()
+    let now = 1000
+    bot.entity = {
+      id: 1,
+      position: combatPosition(0, 64, 0),
+      velocity: {
+        x: 0,
+        y: -0.0784,
+        z: 0
+      }
+    }
+    const attacker = {
+      id: 2,
+      position: combatPosition(1, 64, 0)
+    }
+
+    attachKnockbackPause(bot, {
+      now: () => now,
+      pauseMs: 700,
+      debugLog: () => {}
+    })
+    bot.emit('entityHurt', bot.entity, attacker, {
+      sourceCauseId: 3,
+      sourceDirectId: 0
+    })
+    now = 1800
+    bot.entity.velocity.x = 1
+    bot.entity.velocity.y = 0.99
+    bot.entity.velocity.z = 0.85
+    bot._client.emit('entity_velocity', {
+      entityId: 1,
+      velocity: { x: 1, y: 0.99, z: 0.85 }
+    })
+
+    assert.strictEqual(bot.entity.velocity.x, 0)
+    assert.strictEqual(bot.entity.velocity.y, -0.0784)
+    assert.strictEqual(bot.entity.velocity.z, 0)
+  })
+
+  it('keeps direct damage velocity after indirect burn damage', () => {
+    const { attachKnockbackPause } = require('../bot')
+    const bot = new EventEmitter()
+    bot._client = new EventEmitter()
+    let now = 1000
+    bot.entity = {
+      id: 1,
+      position: combatPosition(0, 64, 0),
+      velocity: {
+        x: 0,
+        y: -0.0784,
+        z: 0
+      }
+    }
+    const attacker = {
+      id: 2,
+      position: combatPosition(1, 64, 0)
+    }
+
+    attachKnockbackPause(bot, {
+      now: () => now,
+      pauseMs: 700,
+      debugLog: () => {}
+    })
+    bot.emit('entityHurt', bot.entity, attacker, {
+      sourceCauseId: 3,
+      sourceDirectId: 0
+    })
+    now = 1050
+    bot.emit('entityHurt', bot.entity, attacker, {
+      sourceCauseId: 3,
+      sourceDirectId: 3
+    })
+    bot.entity.velocity.x = -0.4
+    bot.entity.velocity.y = 0.32
+    bot.entity.velocity.z = 0.1
+    bot._client.emit('entity_velocity', {
+      entityId: 1,
+      velocity: { x: -0.4, y: 0.32, z: 0.1 }
+    })
+
+    assert.strictEqual(bot.entity.velocity.x, -0.4)
+    assert.strictEqual(bot.entity.velocity.y, 0.32)
+    assert.strictEqual(bot.entity.velocity.z, 0.1)
+  })
+
+  it('corrects direct-hit server velocity that points toward the attacker', () => {
+    const { attachKnockbackPause } = require('../bot')
+    const bot = new EventEmitter()
+    bot._client = new EventEmitter()
+    bot.entity = {
+      id: 1,
+      position: combatPosition(0, 64, 0),
+      velocity: {
+        x: 0,
+        y: 0,
+        z: 0
+      }
+    }
+    const attacker = {
+      id: 2,
+      position: combatPosition(1, 64, 0)
+    }
+
+    attachKnockbackPause(bot, {
+      now: () => 1000,
+      pauseMs: 700,
+      horizontalVelocity: 0.45,
+      verticalVelocity: 0.35,
+      debugLog: () => {}
+    })
+    bot.emit('entityHurt', bot.entity, attacker, {
+      sourceCauseId: 3,
+      sourceDirectId: 3
+    })
+    bot.entity.velocity.x = 0.6
+    bot.entity.velocity.y = -0.1
+    bot.entity.velocity.z = 0
+    bot._client.emit('entity_velocity', {
+      entityId: 1,
+      velocity: { x: 0.6, y: -0.1, z: 0 }
+    })
+
+    assert.strictEqual(bot.entity.velocity.x, -0.6)
+    assert.strictEqual(bot.entity.velocity.y, 0.35)
+    assert.strictEqual(bot.entity.velocity.z, 0)
+  })
+
+  it('corrects direct-hit server velocity even when another listener applies it later', async () => {
+    const { attachKnockbackPause } = require('../bot')
+    const bot = new EventEmitter()
+    bot._client = new EventEmitter()
+    bot.entity = {
+      id: 1,
+      position: combatPosition(0, 64, 0),
+      velocity: {
+        x: 0,
+        y: 0,
+        z: 0
+      }
+    }
+    const attacker = {
+      id: 2,
+      position: combatPosition(1, 64, 0)
+    }
+
+    attachKnockbackPause(bot, {
+      now: () => 1000,
+      pauseMs: 700,
+      horizontalVelocity: 0.45,
+      verticalVelocity: 0.35,
+      debugLog: () => {}
+    })
+    bot._client.on('entity_velocity', packet => {
+      bot.entity.velocity.x = packet.velocity.x
+      bot.entity.velocity.y = packet.velocity.y
+      bot.entity.velocity.z = packet.velocity.z
+    })
+    bot.emit('entityHurt', bot.entity, attacker, {
+      sourceCauseId: 3,
+      sourceDirectId: 3
+    })
+    bot._client.emit('entity_velocity', {
+      entityId: 1,
+      velocity: { x: 0.6, y: -0.1, z: 0 }
+    })
+    await Promise.resolve()
+
+    assert.strictEqual(bot.entity.velocity.x, -0.6)
+    assert.strictEqual(bot.entity.velocity.y, 0.35)
+    assert.strictEqual(bot.entity.velocity.z, 0)
+  })
+
+  it('preserves enchanted direct-hit magnitude when correcting direction', async () => {
+    const { attachKnockbackPause } = require('../bot')
+    const bot = new EventEmitter()
+    bot._client = new EventEmitter()
+    bot.entity = {
+      id: 1,
+      position: combatPosition(0, 64, 0),
+      velocity: {
+        x: 0,
+        y: 0,
+        z: 0
+      }
+    }
+    const attacker = {
+      id: 2,
+      position: combatPosition(1, 64, 0)
+    }
+
+    attachKnockbackPause(bot, {
+      now: () => 1000,
+      pauseMs: 700,
+      horizontalVelocity: 0.45,
+      verticalVelocity: 0.35,
+      debugLog: () => {}
+    })
+    bot._client.on('entity_velocity', packet => {
+      bot.entity.velocity.x = packet.velocity.x
+      bot.entity.velocity.y = packet.velocity.y
+      bot.entity.velocity.z = packet.velocity.z
+    })
+    bot.emit('entityHurt', bot.entity, attacker, {
+      sourceCauseId: 3,
+      sourceDirectId: 3
+    })
+    bot._client.emit('entity_velocity', {
+      entityId: 1,
+      velocity: { x: 1.58, y: 1.94, z: -1.25 }
+    })
+    await Promise.resolve()
+
+    const expectedHorizontal = Math.sqrt(1.58 * 1.58 + 1.25 * 1.25)
+    assert.ok(Math.abs(bot.entity.velocity.x + expectedHorizontal) < 1e-12)
+    assert.strictEqual(bot.entity.velocity.y, 1.94)
+    assert.strictEqual(bot.entity.velocity.z, 0)
+  })
+
+  it('keeps enchanted direct-hit velocity that already points away', async () => {
+    const { attachKnockbackPause } = require('../bot')
+    const bot = new EventEmitter()
+    bot._client = new EventEmitter()
+    bot.entity = {
+      id: 1,
+      position: combatPosition(0, 64, 0),
+      velocity: {
+        x: 0,
+        y: 0,
+        z: 0
+      }
+    }
+    const attacker = {
+      id: 2,
+      position: combatPosition(1, 64, 0)
+    }
+
+    attachKnockbackPause(bot, {
+      now: () => 1000,
+      pauseMs: 700,
+      horizontalVelocity: 0.45,
+      verticalVelocity: 0.35,
+      debugLog: () => {}
+    })
+    bot._client.on('entity_velocity', packet => {
+      bot.entity.velocity.x = packet.velocity.x
+      bot.entity.velocity.y = packet.velocity.y
+      bot.entity.velocity.z = packet.velocity.z
+    })
+    bot.emit('entityHurt', bot.entity, attacker, {
+      sourceCauseId: 3,
+      sourceDirectId: 3
+    })
+    bot._client.emit('entity_velocity', {
+      entityId: 1,
+      velocity: { x: -2, y: 1.5, z: 0 }
+    })
+    await Promise.resolve()
+
+    assert.strictEqual(bot.entity.velocity.x, -2)
+    assert.strictEqual(bot.entity.velocity.y, 1.5)
+    assert.strictEqual(bot.entity.velocity.z, 0)
+  })
+
+  it('keeps direct-hit server velocity that is not clearly toward the attacker', async () => {
+    const { attachKnockbackPause } = require('../bot')
+    const bot = new EventEmitter()
+    bot._client = new EventEmitter()
+    bot.entity = {
+      id: 1,
+      position: combatPosition(0, 64, 0),
+      velocity: {
+        x: 0,
+        y: 0,
+        z: 0
+      }
+    }
+    const attacker = {
+      id: 2,
+      position: combatPosition(1, 64, 0)
+    }
+
+    attachKnockbackPause(bot, {
+      now: () => 1000,
+      pauseMs: 700,
+      horizontalVelocity: 0.45,
+      verticalVelocity: 0.35,
+      debugLog: () => {}
+    })
+    bot._client.on('entity_velocity', packet => {
+      bot.entity.velocity.x = packet.velocity.x
+      bot.entity.velocity.y = packet.velocity.y
+      bot.entity.velocity.z = packet.velocity.z
+    })
+    bot.emit('entityHurt', bot.entity, attacker, {
+      sourceCauseId: 3,
+      sourceDirectId: 3
+    })
+    bot._client.emit('entity_velocity', {
+      entityId: 1,
+      velocity: { x: 0, y: 0.7, z: 1.2 }
+    })
+    await Promise.resolve()
+
+    assert.strictEqual(bot.entity.velocity.x, 0)
+    assert.strictEqual(bot.entity.velocity.y, 0.7)
+    assert.strictEqual(bot.entity.velocity.z, 1.2)
+  })
+
+  it('preserves arrow punch magnitude from the projectile velocity direction', async () => {
+    const { attachKnockbackPause } = require('../bot')
+    const bot = new EventEmitter()
+    bot._client = new EventEmitter()
+    bot.entity = {
+      id: 1,
+      position: combatPosition(0, 64, 0),
+      velocity: {
+        x: 0,
+        y: 0,
+        z: 0
+      }
+    }
+    const shooter = {
+      id: 2,
+      position: combatPosition(1, 64, 0)
+    }
+
+    attachKnockbackPause(bot, {
+      now: () => 1000,
+      pauseMs: 700,
+      horizontalVelocity: 0.45,
+      verticalVelocity: 0.35,
+      debugLog: () => {}
+    })
+    bot._client.on('entity_velocity', packet => {
+      bot.entity.velocity.x = packet.velocity.x
+      bot.entity.velocity.y = packet.velocity.y
+      bot.entity.velocity.z = packet.velocity.z
+    })
+    bot.emit('entityHurt', bot.entity, shooter, {
+      sourceCauseId: 3,
+      sourceDirectId: 4,
+      sourceDirectVelocity: { x: 0, y: 0, z: 1 }
+    })
+    bot._client.emit('entity_velocity', {
+      entityId: 1,
+      velocity: { x: -1.5, y: 1, z: 0 }
+    })
+    await Promise.resolve()
+
+    assert.strictEqual(bot.entity.velocity.x, 0)
+    assert.strictEqual(bot.entity.velocity.y, 1)
+    assert.strictEqual(bot.entity.velocity.z, 1.5)
+  })
+
+  for (const sourceTypeId of [9, 29]) {
+    it(`ignores self velocity packets caused by no-direct damage source type ${sourceTypeId}`, () => {
+      const { attachKnockbackPause } = require('../bot')
+      const bot = new EventEmitter()
+      bot._client = new EventEmitter()
+      bot.entity = {
+        id: 1,
+        position: combatPosition(0, 64, 0),
+        velocity: {
+          x: 0,
+          y: -0.0784,
+          z: 0
+        }
+      }
+
+      attachKnockbackPause(bot, {
+        now: () => 1000,
+        pauseMs: 700,
+        debugLog: () => {}
+      })
+      bot.emit('entityHurt', bot.entity, null, {
+        sourceTypeId,
+        sourceCauseId: 0,
+        sourceDirectId: 0
+      })
+      bot.entity.velocity.x = 1
+      bot.entity.velocity.y = 0.99
+      bot.entity.velocity.z = 0.85
+      bot._client.emit('entity_velocity', {
+        entityId: 1,
+        velocity: { x: 1, y: 0.99, z: 0.85 }
+      })
+
+      assert.strictEqual(bot.entity.velocity.x, 0)
+      assert.strictEqual(bot.entity.velocity.y, -0.0784)
+      assert.strictEqual(bot.entity.velocity.z, 0)
+    })
+  }
+
+  it('ignores no-direct damage velocity even when another listener applies it later', async () => {
+    const { attachKnockbackPause } = require('../bot')
+    const bot = new EventEmitter()
+    bot._client = new EventEmitter()
+    bot.entity = {
+      id: 1,
+      position: combatPosition(0, 64, 0),
+      velocity: {
+        x: 0,
+        y: -0.0784,
+        z: 0
+      }
+    }
+
+    attachKnockbackPause(bot, {
+      now: () => 1000,
+      pauseMs: 700,
+      debugLog: () => {}
+    })
+    bot._client.on('entity_velocity', packet => {
+      bot.entity.velocity.x = packet.velocity.x
+      bot.entity.velocity.y = packet.velocity.y
+      bot.entity.velocity.z = packet.velocity.z
+    })
+    bot.emit('entityHurt', bot.entity, null, {
+      sourceTypeId: 29,
+      sourceCauseId: 0,
+      sourceDirectId: 0
+    })
+    bot._client.emit('entity_velocity', {
+      entityId: 1,
+      velocity: { x: 3, y: 2.98, z: -1.37 }
+    })
+    await Promise.resolve()
+
+    assert.strictEqual(bot.entity.velocity.x, 0)
+    assert.strictEqual(bot.entity.velocity.y, -0.0784)
     assert.strictEqual(bot.entity.velocity.z, 0)
   })
 
@@ -2613,6 +3265,7 @@ describe('holocraft bot config', function () {
 
     const controller = attachNightSafety(bot, {
       checkIntervalMs: 0,
+      enabled: true,
       debugLog: () => {},
       runNightSafetyCycle: async () => events.push(['night']),
       runDayGearCycle: async () => events.push(['gear']),
@@ -3157,6 +3810,26 @@ describe('holocraft bot config', function () {
     assert.deepStrictEqual(events, [['night']])
   })
 
+  it('keeps night safety disabled by default', async () => {
+    const { attachNightSafety } = require('../bot')
+    const bot = new EventEmitter()
+    const events = []
+    bot.physicsEnabled = true
+    bot.time = { isDay: false, timeOfDay: 14000 }
+
+    const controller = attachNightSafety(bot, {
+      checkIntervalMs: 0,
+      debugLog: () => {},
+      runNightSafetyCycle: async () => events.push(['night'])
+    })
+
+    await new Promise(resolve => setImmediate(resolve))
+    await controller.check()
+
+    assert.strictEqual(controller.isEnabled(), false)
+    assert.deepStrictEqual(events, [])
+  })
+
   it('does not start daytime automation when physics becomes enabled after a daytime spawn', async () => {
     const { attachNightSafety } = require('../bot')
     const bot = new EventEmitter()
@@ -3167,6 +3840,7 @@ describe('holocraft bot config', function () {
 
     attachNightSafety(bot, {
       checkIntervalMs: 0,
+      enabled: true,
       debugLog: () => {},
       runNightSafetyCycle: async () => events.push(['night']),
       runDayGearCycle: async () => events.push(['gear']),
@@ -3195,6 +3869,7 @@ describe('holocraft bot config', function () {
 
     attachNightSafety(bot, {
       checkIntervalMs: 0,
+      enabled: true,
       debugLog: () => {},
       runDayGearCycle: async () => events.push(['gear']),
       leaveHomeForDaytime: async () => events.push(['exit']),
@@ -3220,6 +3895,7 @@ describe('holocraft bot config', function () {
 
     attachNightSafety(bot, {
       checkIntervalMs: 0,
+      enabled: true,
       autoStartDaytimeAutomation: true,
       debugLog: () => {},
       runDayGearCycle: async () => events.push(['gear']),
@@ -3249,6 +3925,7 @@ describe('holocraft bot config', function () {
 
     attachNightSafety(bot, {
       checkIntervalMs: 0,
+      enabled: true,
       sleep: async () => {},
       debugLog: () => {}
     })
@@ -3267,6 +3944,7 @@ describe('holocraft bot config', function () {
 
     const controller = attachNightSafety(bot, {
       checkIntervalMs: 0,
+      enabled: true,
       nightRetryDelayMs: 0,
       debugLog: () => {},
       runNightSafetyCycle: async () => {
@@ -3293,6 +3971,7 @@ describe('holocraft bot config', function () {
 
     const controller = attachNightSafety(bot, {
       checkIntervalMs: 0,
+      enabled: true,
       nightRetryDelayMs: 5000,
       now: () => now,
       debugLog: () => {},
@@ -3325,6 +4004,7 @@ describe('holocraft bot config', function () {
 
     const controller = attachNightSafety(bot, {
       checkIntervalMs: 0,
+      enabled: true,
       nightRetryDelayMs: 0,
       debugLog: () => {},
       runNightSafetyCycle: async (nightBot, options) => {
@@ -3357,6 +4037,7 @@ describe('holocraft bot config', function () {
     bot.chat = command => events.push(['chat', command])
 
     attachNightSafety(bot, {
+      enabled: true,
       sleep: async () => {},
       debugLog: () => {},
       setInterval: (fn) => {

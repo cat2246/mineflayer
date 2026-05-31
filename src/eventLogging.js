@@ -15,14 +15,18 @@ function isIgnorableParticleDecodeError (err) {
   return text.includes('PartialReadError') && text.includes('packet_world_particles')
 }
 
-async function enablePhysicsAfterDelay (bot, wait, debugLog, spawnCount) {
-  await wait(PHYSICS_ENABLE_DELAY_MS)
+function enablePhysics (bot, debugLog, spawnCount) {
   if (!bot._ended) {
     bot.physicsEnabled = true
     console.log('Physics enabled')
     debugLog('physics.enabled', { spawnCount })
     if (typeof bot.emit === 'function') bot.emit('physicsEnabled', { spawnCount })
   }
+}
+
+async function enablePhysicsAfterDelay (bot, wait, debugLog, spawnCount) {
+  await wait(PHYSICS_ENABLE_DELAY_MS)
+  enablePhysics(bot, debugLog, spawnCount)
 }
 
 function attachEventLogging (bot, options = {}) {
@@ -72,10 +76,10 @@ function attachEventLogging (bot, options = {}) {
       }
 
       try {
+        enablePhysics(bot, debugLog, spawnCount)
         await joinWorld(bot)
         console.log('Sent /survival command')
         debugLog('command.sent', { command: '/survival' })
-        await enablePhysicsAfterDelay(bot, wait, debugLog, spawnCount)
       } catch (err) {
         console.log('Could not join Survival world:', err.message)
         debugLog('command.error', { command: '/survival', error: err.message })

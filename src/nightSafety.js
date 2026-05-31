@@ -609,7 +609,7 @@ function attachNightSafety (bot, options = {}) {
   const now = options.now || Date.now
   const nightRetryDelayMs = options.nightRetryDelayMs ?? NIGHT_SAFETY_RETRY_DELAY_MS
   const autoStartDaytimeAutomation = options.autoStartDaytimeAutomation === true
-  let enabled = options.enabled !== false
+  let enabled = options.enabled === true
   let running = false
   let lastPeriod = null
   let nightHomeAnchor = null
