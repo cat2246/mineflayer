@@ -57,6 +57,81 @@ function isContainerBlockName (name = '') {
   return /^(chest|trapped_chest|barrel)$/i.test(name)
 }
 
+function isChestBlockName (name = '') {
+  return /^(chest|trapped_chest)$/i.test(name)
+}
+
+function chestConnectionType (block) {
+  const type = block?._properties?.type || block?.properties?.type
+  return typeof type === 'string' ? type.toLowerCase() : null
+}
+
+function isLargeChestHalf (block) {
+  return Boolean(isChestBlockName(block?.name) && ['left', 'right'].includes(chestConnectionType(block)))
+}
+
+function isAdjacentHorizontalBlock (a, b) {
+  if (!a?.position || !b?.position) return false
+  const dx = Math.abs(Math.round(a.position.x) - Math.round(b.position.x))
+  const dz = Math.abs(Math.round(a.position.z) - Math.round(b.position.z))
+  return Math.round(a.position.y) === Math.round(b.position.y) && dx + dz === 1
+}
+
+function areLargeChestHalves (a, b) {
+  if (!isLargeChestHalf(a) || !isLargeChestHalf(b)) return false
+  if (a.name !== b.name) return false
+  if (chestConnectionType(a) === chestConnectionType(b)) return false
+  const aFacing = containerFacing(a)
+  const bFacing = containerFacing(b)
+  if (aFacing && bFacing && aFacing !== bFacing) return false
+  return isAdjacentHorizontalBlock(a, b)
+}
+
+function findLargeChestPair (block, blocks) {
+  return blocks.find(candidate => candidate !== block && areLargeChestHalves(block, candidate)) || null
+}
+
+function largeChestPairKey (a, b) {
+  return [positionKey(a.position), positionKey(b.position)].sort().join('|')
+}
+
+function closestInteractionDistance (bot, block) {
+  const botPosition = bot.entity?.position
+  if (!botPosition) return 0
+  const targets = containerInteractionTargets(bot, block)
+  if (targets.length === 0) return distanceBetween(botPosition, block.position)
+  return Math.min(...targets.map(target => distanceBetween(botPosition, target)))
+}
+
+function chooseLargeChestRepresentative (bot, blocks) {
+  const botPosition = bot.entity?.position
+  return blocks.slice().sort((a, b) =>
+    closestInteractionDistance(bot, a) - closestInteractionDistance(bot, b) ||
+    (botPosition ? distanceBetween(botPosition, a.position) - distanceBetween(botPosition, b.position) : 0)
+  )[0]
+}
+
+function dedupeLargeChestBlocks (bot, blocks) {
+  if (!Array.isArray(blocks) || blocks.length < 2) return blocks
+
+  const seenPairs = new Set()
+  const uniqueBlocks = []
+  for (const block of blocks) {
+    const pair = findLargeChestPair(block, blocks)
+    if (!pair) {
+      uniqueBlocks.push(block)
+      continue
+    }
+
+    const key = largeChestPairKey(block, pair)
+    if (seenPairs.has(key)) continue
+    seenPairs.add(key)
+    uniqueBlocks.push(chooseLargeChestRepresentative(bot, [block, pair]))
+  }
+
+  return uniqueBlocks
+}
+
 function containerItems (container) {
   if (typeof container.containerItems === 'function') return container.containerItems()
   if (typeof container.items === 'function') return container.items()
@@ -303,7 +378,7 @@ function allContainersSearchedWithoutDesiredItems (bot, blocks, desiredItems = [
 function findNearbyContainerBlocks (bot, options = {}) {
   const searchRadius = searchRadiusForOptions(bot, options)
   const houseOnly = shouldUseHouseBounds(bot, options)
-  const homeAnchor = rememberedHomeAnchor(bot, options)
+  const homeAnchor = houseOnly ? rememberedHomeAnchor(bot, options) : null
   const originPosition = homeAnchor || options.originPosition || bot.entity?.position
 
   if (typeof bot.findBlocks === 'function' && typeof bot.blockAt === 'function') {
@@ -323,9 +398,10 @@ function findNearbyContainerBlocks (bot, options = {}) {
         if (!originPosition) return 0
         return distanceBetween(originPosition, a.position) - distanceBetween(originPosition, b.position)
       })
+    const uniqueBlocks = dedupeLargeChestBlocks(bot, blocks)
 
-    rememberContainerBlocks(bot, blocks, options)
-    return sortContainerBlocksByMemory(bot, blocks, options)
+    rememberContainerBlocks(bot, uniqueBlocks, options)
+    return sortContainerBlocksByMemory(bot, uniqueBlocks, options)
   }
 
   if (typeof bot.findBlock !== 'function') return []
@@ -459,8 +535,9 @@ async function waitForContainerInteraction (options = {}, phase = 'container') {
 async function visitContainerBlocks (bot, blocks, options = {}, visitor) {
   if (typeof bot.openContainer !== 'function') return false
 
-  rememberContainerBlocks(bot, blocks, options)
-  for (const block of blocks) {
+  const uniqueBlocks = dedupeLargeChestBlocks(bot, blocks)
+  rememberContainerBlocks(bot, uniqueBlocks, options)
+  for (const block of uniqueBlocks) {
     if (!await prepareContainerBlock(bot, block, options)) continue
     const container = await bot.openContainer(block)
     try {
@@ -488,7 +565,7 @@ async function visitNearbyContainers (bot, options = {}, visitor) {
 async function visitKnownContainers (bot, blocks, options = {}, visitor) {
   if (typeof bot.openContainer !== 'function') return false
 
-  for (const block of blocks) {
+  for (const block of dedupeLargeChestBlocks(bot, blocks)) {
     if (!await prepareContainerBlock(bot, block, options)) continue
     const container = await bot.openContainer(block)
     try {

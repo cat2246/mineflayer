@@ -593,7 +593,11 @@ async function runNightSafetyCycle (bot, options = {}) {
   bot.__nightSafetyActive = true
 
   try {
-    options.automationManager?.stopActive?.()
+    if (typeof options.automationManager?.pauseActiveForNightSafety === 'function') {
+      options.automationManager.pauseActiveForNightSafety()
+    } else {
+      options.automationManager?.stopActive?.()
+    }
     if (bot.pvp?.target && typeof bot.pvp.stop === 'function') await bot.pvp.stop()
     stopBotMovement(bot)
     if (!options.skipHomeTeleport) {
@@ -702,7 +706,11 @@ function attachNightSafety (bot, options = {}) {
             originPosition: clonePosition(bot.entity?.position) || originPosition
           })
         }
-        if (autoStartDaytimeAutomation && !isNightTime(bot) && !bot._ended) {
+        let resumedPausedAutomation = false
+        if (gearedUp !== false && !isNightTime(bot) && !bot._ended) {
+          resumedPausedAutomation = await options.automationManager?.resumePausedAfterNightSafety?.() === true
+        }
+        if (!resumedPausedAutomation && autoStartDaytimeAutomation && !isNightTime(bot) && !bot._ended) {
           await daytimeAutomationRunner(bot, {
             ...options,
             originPosition,

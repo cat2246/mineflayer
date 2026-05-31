@@ -1567,7 +1567,7 @@ describe('holocraft bot config', function () {
     assert.deepStrictEqual(events, [['toggleNightSafety']])
   })
 
-  it('lists farming and wild roaming in the default automation menu', async () => {
+  it('lists farming, wild roaming, and mining in the default automation menu', async () => {
     const { createAutomationManager } = require('../bot')
     const events = []
     const bot = new EventEmitter()
@@ -1582,13 +1582,17 @@ describe('holocraft bot config', function () {
       }),
       startWildRoamingAutomation: () => ({
         stop: () => events.push(['stop', 'wild'])
+      }),
+      startMiningAutomation: () => ({
+        stop: () => events.push(['stop', 'mining'])
       })
     })
 
     assert.deepStrictEqual(automationManager.list(), [
       { name: 'Wood cutting' },
       { name: 'Farming' },
-      { name: 'Wild roaming' }
+      { name: 'Wild roaming' },
+      { name: 'Mining' }
     ])
 
     await automationManager.startByIndex(1)
@@ -1723,6 +1727,43 @@ describe('holocraft bot config', function () {
     bot.emit('kicked', '[Vulcan] Unfair Advantage')
 
     assert.deepStrictEqual(events, [['stop']])
+  })
+
+  it('pauses and resumes mining after night safety', async () => {
+    const { createAutomationManager } = require('../bot')
+    const events = []
+    const bot = new EventEmitter()
+    let starts = 0
+    const automationManager = createAutomationManager(bot, {
+      output: () => {},
+      debugLog: (event, data) => events.push(['debug', event, data?.name]),
+      automations: [
+        {
+          name: 'Mining',
+          resumeAfterNightSafety: true,
+          start: () => {
+            starts++
+            events.push(['start', starts])
+            return {
+              stop: () => events.push(['stop', starts])
+            }
+          }
+        }
+      ]
+    })
+
+    await automationManager.startByIndex(0)
+    assert.strictEqual(automationManager.pauseActiveForNightSafety(), true)
+    assert.strictEqual(await automationManager.resumePausedAfterNightSafety(), true)
+
+    assert.deepStrictEqual(events, [
+      ['start', 1],
+      ['debug', 'automation.start', 'Mining'],
+      ['stop', 1],
+      ['debug', 'automation.pauseForNightSafety', 'Mining'],
+      ['start', 2],
+      ['debug', 'automation.resumeAfterNightSafety', 'Mining']
+    ])
   })
 
   it('sends /message content directly to Minecraft chat', async () => {
@@ -3918,6 +3959,205 @@ describe('holocraft bot config', function () {
     ])
   })
 
+  it('moves away from home before mining inside the protected radius', async () => {
+    const { runMiningCycle } = require('../bot')
+    const events = []
+    const bot = blockBot([block('coal_ore', 20, 64, 0)], events)
+    bot.entity.position = combatPosition(10, 64, 0)
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+    }
+
+    const ran = await runMiningCycle(bot, {
+      homePosition: combatPosition(0, 64, 0),
+      minimumHomeDistance: 50,
+      roamTarget: combatPosition(80, 64, 0),
+      debugLog: (event, data) => events.push(['debug', event, data?.distanceFromHome]),
+      sleep: async () => {}
+    })
+
+    assert.strictEqual(ran, true)
+    assert.deepStrictEqual(events, [
+      ['debug', 'automation.mining.nearHome', 10],
+      ['goto', 'GoalNearXZ', 80, undefined, 0],
+      ['debug', 'automation.mining.roam', 80]
+    ])
+  })
+
+  it('mines configured ores only outside the protected home radius', async () => {
+    const { runMiningCycle } = require('../bot')
+    const events = []
+    const nearCoal = block('coal_ore', 25, 64, 0)
+    const farDiamond = block('diamond_ore', 70, 64, 0)
+    const farStone = block('stone', 60, 64, 0)
+    const bot = blockBot([nearCoal, farDiamond, farStone], events)
+    bot.entity.position = combatPosition(65, 64, 0)
+    bot.inventory.items = () => [{ name: 'iron_pickaxe', type: 257, count: 1 }]
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+    }
+    bot.lookAt = async position => events.push(['lookAt', Math.floor(position.x), Math.floor(position.y), Math.floor(position.z)])
+
+    const ran = await runMiningCycle(bot, {
+      homePosition: combatPosition(0, 64, 0),
+      minimumHomeDistance: 50,
+      debugLog: (event, data) => events.push(['debug', event, data?.block]),
+      sleep: async () => {}
+    })
+
+    assert.strictEqual(ran, true)
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalNear', 70, 64, 0],
+      ['equip', 'iron_pickaxe', 'hand'],
+      ['lookAt', 70, 64, 0],
+      ['dig', 'diamond_ore'],
+      ['debug', 'automation.mining.mine', 'diamond_ore']
+    ])
+  })
+
+  it('teleports home and deposits mined items when mining inventory is full', async () => {
+    const { runMiningCycle } = require('../bot')
+    const events = []
+    const chestBlock = block('chest', 1, 64, 0)
+    const coal = { name: 'coal', type: 263, count: 12 }
+    const rawIron = { name: 'raw_iron', type: 1001, count: 5 }
+    const cobblestone = { name: 'cobblestone', type: 4, count: 64 }
+    const pickaxe = { name: 'iron_pickaxe', type: 257, count: 1 }
+    const bread = { name: 'bread', type: 297, count: 4 }
+    const bot = blockBot([chestBlock], events)
+    bot.entity.position = combatPosition(0, 64, 0)
+    bot.inventory.emptySlotCount = () => 0
+    bot.inventory.items = () => [coal, rawIron, cobblestone, pickaxe, bread]
+    bot.chat = command => events.push(['chat', command])
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+    }
+    bot.lookAt = async position => events.push(['lookAt', Math.floor(position.x), Math.floor(position.y), Math.floor(position.z)])
+    bot.openContainer = async () => ({
+      containerItems: () => [],
+      deposit: async (type, metadata, count) => events.push(['deposit', type, count]),
+      close: () => events.push(['close'])
+    })
+
+    const ran = await runMiningCycle(bot, {
+      homePosition: combatPosition(0, 64, 0),
+      homeWaitMs: 0,
+      containerInteractionDelayMs: 0,
+      containerMemoryPath: tempContainerMemoryPath(),
+      placesPath: tempPlacesPath(),
+      debugLog: () => {},
+      sleep: async () => {}
+    })
+
+    assert.strictEqual(ran, true)
+    assert.deepStrictEqual(events, [
+      ['chat', '/home home'],
+      ['lookAt', 1, 64, 0],
+      ['deposit', 263, 12],
+      ['deposit', 1001, 5],
+      ['deposit', 4, 64],
+      ['close']
+    ])
+  })
+
+  it('digs a two-high tunnel when no ore is visible while mining', async () => {
+    const { runMiningCycle } = require('../bot')
+    const events = []
+    const tunnelFloor = block('stone', 81, 64, 0)
+    const tunnelHead = block('stone', 81, 65, 0)
+    const bot = blockBot([tunnelFloor, tunnelHead], events)
+    bot.entity.position = combatPosition(80, 64, 0)
+    bot.inventory.items = () => [{ name: 'iron_pickaxe', type: 257, count: 1 }]
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+    }
+    bot.lookAt = async position => events.push(['lookAt', Math.floor(position.x), Math.floor(position.y), Math.floor(position.z)])
+
+    const ran = await runMiningCycle(bot, {
+      homePosition: combatPosition(0, 64, 0),
+      targetMiningY: 64,
+      postDigDelayMs: 0,
+      debugLog: (event, data) => events.push(['debug', event, data?.target?.x || data?.block]),
+      sleep: async () => {}
+    })
+
+    assert.strictEqual(ran, true)
+    assert.deepStrictEqual(events, [
+      ['equip', 'iron_pickaxe', 'hand'],
+      ['lookAt', 81, 64, 0],
+      ['dig', 'stone'],
+      ['equip', 'iron_pickaxe', 'hand'],
+      ['lookAt', 81, 65, 0],
+      ['dig', 'stone'],
+      ['goto', 'GoalNear', 81, 64, 0],
+      ['debug', 'automation.mining.tunnel', 81]
+    ])
+  })
+
+  it('opens side probes while strip mining for hidden ore', async () => {
+    const { runMiningCycle } = require('../bot')
+    const events = []
+    const branchFloor = block('stone', 81, 64, 1)
+    const branchHead = block('stone', 81, 65, 1)
+    const bot = blockBot([branchFloor, branchHead], events)
+    bot.entity.position = combatPosition(80, 64, 0)
+    bot.inventory.items = () => [{ name: 'iron_pickaxe', type: 257, count: 1 }]
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+    }
+    bot.lookAt = async position => events.push(['lookAt', Math.floor(position.x), Math.floor(position.y), Math.floor(position.z)])
+
+    const ran = await runMiningCycle(bot, {
+      homePosition: combatPosition(0, 64, 0),
+      targetMiningY: 64,
+      stripMineBranchInterval: 1,
+      stripMineBranchDepth: 1,
+      postDigDelayMs: 0,
+      debugLog: (event, data) => events.push(['debug', event, data?.side]),
+      sleep: async () => {}
+    })
+
+    assert.strictEqual(ran, true)
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalNear', 81, 64, 0],
+      ['equip', 'iron_pickaxe', 'hand'],
+      ['lookAt', 81, 64, 1],
+      ['dig', 'stone'],
+      ['equip', 'iron_pickaxe', 'hand'],
+      ['lookAt', 81, 65, 1],
+      ['dig', 'stone'],
+      ['debug', 'automation.mining.stripMineBranch', 'right'],
+      ['debug', 'automation.mining.tunnel', undefined]
+    ])
+  })
+
+  it('keeps mining automation running until stopped', async () => {
+    const { startMiningAutomation } = require('../bot')
+    const output = []
+    const bot = blockBot([])
+    let runCount = 0
+    let sleepCount = 0
+
+    startMiningAutomation(bot, {
+      output: message => output.push(message),
+      debugLog: () => {},
+      sleep: async () => {
+        sleepCount++
+        if (sleepCount >= 2) bot._ended = true
+      },
+      runMiningTask: async () => {
+        runCount++
+        return true
+      }
+    })
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.strictEqual(runCount, 2)
+    assert(output.some(message => message.includes('Started mining automation.')))
+    assert.strictEqual(output.filter(message => message.includes('Mining automation task completed.')).length, 0)
+  })
+
   it('replants a matching sapling after cutting a tree', async () => {
     const { replantSaplingNearTree } = require('../bot')
     const events = []
@@ -4601,6 +4841,41 @@ describe('holocraft bot config', function () {
     ])
   })
 
+  it('opens only one half of a large chest candidate', async () => {
+    const { visitNearbyContainers } = require('../bot')
+    const events = []
+    const leftChest = block('chest', 1, 64, 0)
+    const rightChest = block('chest', 2, 64, 0)
+    leftChest.properties = { facing: 'north', type: 'left' }
+    rightChest.properties = { facing: 'north', type: 'right' }
+    const bot = blockBot([leftChest, rightChest], events)
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.x, goal.y, goal.z])
+    }
+    bot.lookAt = async position => events.push(['lookAt', Math.floor(position.x), Math.floor(position.y), Math.floor(position.z)])
+    bot.openContainer = async target => {
+      events.push(['openContainer', target.position.x])
+      return {
+        containerItems: () => [],
+        close: () => events.push(['close', target.position.x])
+      }
+    }
+
+    const visited = await visitNearbyContainers(bot, {
+      containerInteractionDelayMs: 0,
+      containerMemoryPath: tempContainerMemoryPath(),
+      houseOnly: false
+    }, async () => false)
+
+    assert.strictEqual(visited, false)
+    assert.deepStrictEqual(events, [
+      ['goto', 1, 64, -1],
+      ['lookAt', 1, 64, 0],
+      ['openContainer', 1],
+      ['close', 1]
+    ])
+  })
+
   it('walks to the container front and looks at it before opening', async () => {
     const { visitNearbyContainers } = require('../bot')
     const events = []
@@ -4845,6 +5120,35 @@ describe('holocraft bot config', function () {
       ['gear'],
       ['exit'],
       ['doorOpener', 'function']
+    ])
+  })
+
+  it('resumes paused mining automation after morning regear', async () => {
+    const { attachNightSafety } = require('../bot')
+    const bot = new EventEmitter()
+    const events = []
+    bot.physicsEnabled = true
+    bot.time = { isDay: true, timeOfDay: 1000 }
+    bot.entity = { position: combatPosition(0, 68, 0) }
+
+    attachNightSafety(bot, {
+      checkIntervalMs: 0,
+      enabled: true,
+      debugLog: () => {},
+      automationManager: {
+        resumePausedAfterNightSafety: async () => events.push(['resumeMining'])
+      },
+      runDayGearCycle: async () => events.push(['gear']),
+      leaveHomeForDaytime: async () => events.push(['exit'])
+    })
+
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [
+      ['gear'],
+      ['exit'],
+      ['resumeMining']
     ])
   })
 

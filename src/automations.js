@@ -1,5 +1,6 @@
 const { WOODCUTTING_LOOP_DELAY_MS } = require('./config')
 const { runFarmingTask } = require('./farming')
+const { startMiningAutomation } = require('./mining')
 const { sleep } = require('./time')
 const { runWildRoamingTask } = require('./wildRoaming')
 const { startWoodCuttingAutomation } = require('./woodcutting')
@@ -96,7 +97,9 @@ function createAutomationManager (bot, options = {}) {
   const woodCuttingAutomation = options.startWoodCuttingAutomation || startWoodCuttingAutomation
   const farmingAutomation = options.startFarmingAutomation || startFarmingAutomation
   const wildRoamingAutomation = options.startWildRoamingAutomation || startWildRoamingAutomation
+  const miningAutomation = options.startMiningAutomation || startMiningAutomation
   let activeAutomation = null
+  let pausedNightSafetyAutomation = null
 
   const automations = options.automations || [
     {
@@ -110,6 +113,11 @@ function createAutomationManager (bot, options = {}) {
     {
       name: 'Wild roaming',
       start: () => wildRoamingAutomation(bot, { output, debugLog })
+    },
+    {
+      name: 'Mining',
+      resumeAfterNightSafety: true,
+      start: () => miningAutomation(bot, { output, debugLog })
     }
   ]
 
@@ -124,17 +132,55 @@ function createAutomationManager (bot, options = {}) {
       return false
     }
 
-    if (activeAutomation?.stop) activeAutomation.stop()
-    activeAutomation = await automation.start()
+    if (activeAutomation?.instance?.stop) activeAutomation.instance.stop()
+    pausedNightSafetyAutomation = null
+    activeAutomation = {
+      ...automation,
+      instance: await automation.start()
+    }
     debugLog('automation.start', { name: automation.name })
     return true
   }
 
   function stopActive () {
-    if (!activeAutomation?.stop) return false
-    if (activeAutomation?.stop) activeAutomation.stop()
+    const hadActiveAutomation = Boolean(activeAutomation?.instance?.stop)
+    const hadPausedAutomation = Boolean(pausedNightSafetyAutomation)
+    if (!hadActiveAutomation && !hadPausedAutomation) return false
+    if (activeAutomation?.instance?.stop) activeAutomation.instance.stop()
     activeAutomation = null
+    pausedNightSafetyAutomation = null
     debugLog('automation.stop')
+    return true
+  }
+
+  function pauseActiveForNightSafety () {
+    if (!activeAutomation) return false
+
+    const automation = activeAutomation
+    if (automation.instance?.stop) automation.instance.stop()
+    activeAutomation = null
+
+    if (automation.resumeAfterNightSafety) {
+      pausedNightSafetyAutomation = automation
+      debugLog('automation.pauseForNightSafety', { name: automation.name })
+    } else {
+      pausedNightSafetyAutomation = null
+      debugLog('automation.stop', { name: automation.name })
+    }
+
+    return true
+  }
+
+  async function resumePausedAfterNightSafety () {
+    if (activeAutomation || !pausedNightSafetyAutomation) return false
+
+    const automation = pausedNightSafetyAutomation
+    pausedNightSafetyAutomation = null
+    activeAutomation = {
+      ...automation,
+      instance: await automation.start()
+    }
+    debugLog('automation.resumeAfterNightSafety', { name: automation.name })
     return true
   }
 
@@ -143,6 +189,8 @@ function createAutomationManager (bot, options = {}) {
 
   return {
     list,
+    pauseActiveForNightSafety,
+    resumePausedAfterNightSafety,
     startByIndex,
     stopActive
   }
