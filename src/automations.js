@@ -1,6 +1,7 @@
 const { WOODCUTTING_LOOP_DELAY_MS } = require('./config')
 const { runFarmingTask } = require('./farming')
 const { startMiningAutomation } = require('./mining')
+const { startPyroFarmingAutomation } = require('./pyroFarming')
 const { sleep } = require('./time')
 const { runWildRoamingTask } = require('./wildRoaming')
 const { startWoodCuttingAutomation } = require('./woodcutting')
@@ -97,6 +98,7 @@ function createAutomationManager (bot, options = {}) {
   const woodCuttingAutomation = options.startWoodCuttingAutomation || startWoodCuttingAutomation
   const farmingAutomation = options.startFarmingAutomation || startFarmingAutomation
   const wildRoamingAutomation = options.startWildRoamingAutomation || startWildRoamingAutomation
+  const pyroFarmingAutomation = options.startPyroFarmingAutomation || startPyroFarmingAutomation
   const miningAutomation = options.startMiningAutomation || startMiningAutomation
   let activeAutomation = null
   let pausedNightSafetyAutomation = null
@@ -113,6 +115,11 @@ function createAutomationManager (bot, options = {}) {
     {
       name: 'Wild roaming',
       start: () => wildRoamingAutomation(bot, { output, debugLog })
+    },
+    {
+      name: 'Pyro Farming',
+      resumeAfterNightSafety: true,
+      start: () => pyroFarmingAutomation(bot, { output, debugLog })
     },
     {
       name: 'Mining',
@@ -199,5 +206,6 @@ function createAutomationManager (bot, options = {}) {
 module.exports = {
   createAutomationManager,
   startFarmingAutomation,
+  startPyroFarmingAutomation,
   startWildRoamingAutomation
 }

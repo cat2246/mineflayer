@@ -14,7 +14,6 @@ const {
   WOODCUTTING_LEAF_BLOCKER_SEARCH_RADIUS,
   WOODCUTTING_LOG_CANDIDATE_COUNT,
   WOODCUTTING_LOOP_DELAY_MS,
-  WOODCUTTING_MAX_SCAFFOLD_BLOCKS,
   WOODCUTTING_PATH_TIMEOUT_MS,
   WOODCUTTING_POST_DIG_DELAY_MS,
   WOODCUTTING_ROAM_RADIUS,
@@ -46,22 +45,6 @@ function isWoodItemName (name = '') {
 function isSaplingItemName (name = '') {
   return /_sapling$/i.test(name) || name === 'mangrove_propagule' || name === 'crimson_fungus' || name === 'warped_fungus'
 }
-
-const SCAFFOLD_ITEM_PRIORITY = [
-  'dirt',
-  'coarse_dirt',
-  'rooted_dirt',
-  'grass_block',
-  'cobblestone',
-  'cobbled_deepslate',
-  'stone',
-  'andesite',
-  'diorite',
-  'granite',
-  'netherrack',
-  'sand',
-  'gravel'
-]
 
 const WOODCUTTING_IGNORED_TREE_CLUSTER_RADIUS = 2
 
@@ -458,95 +441,14 @@ function createLogApproachGoal (bot, block) {
   return new GoalGetToBlock(block.position.x, block.position.y, block.position.z)
 }
 
-function findScaffoldItem (bot) {
-  const items = typeof bot.inventory?.items === 'function' ? bot.inventory.items() : []
-
-  for (const name of SCAFFOLD_ITEM_PRIORITY) {
-    const item = items.find(candidate => candidate.name === name)
-    if (item) return item
-  }
-
-  return null
-}
-
-async function placeScaffoldBelowBot (bot, options = {}) {
-  const wait = options.sleep || sleep
+async function ensureLogReachable (bot, block, options = {}) {
   const debugLog = options.debugLog || (() => {})
-  const scaffoldItem = findScaffoldItem(bot)
-  const referencePosition = offsetPosition(bot.entity?.position, 0, -1, 0)
-  const referenceBlock = referencePosition ? bot.blockAt(referencePosition) : null
-
-  if (isWoodcuttingStopped(bot, options)) return false
-
-  if (!scaffoldItem || !referenceBlock || typeof bot.placeBlock !== 'function') {
-    debugLog('automation.woodcutting.scaffoldUnavailable', {
-      hasItem: Boolean(scaffoldItem),
-      hasReferenceBlock: Boolean(referenceBlock),
-      canPlaceBlock: typeof bot.placeBlock === 'function'
-    })
-    return false
-  }
-
-  let placed = false
-  try {
-    await bot.equip(scaffoldItem, 'hand')
-
-    if (typeof bot.setControlState === 'function') {
-      bot.setControlState('jump', true)
-    }
-
-    const jumpY = Math.floor(bot.entity?.position?.y ?? 0) + 0.9
-    for (let attempt = 0; attempt < 10; attempt++) {
-      if (isWoodcuttingStopped(bot, options)) return false
-      if ((bot.entity?.position?.y ?? 0) > jumpY) break
-      await wait(randomizedWoodcuttingDelayMs(100, options))
-    }
-
-    if (isWoodcuttingStopped(bot, options)) return false
-    await bot.placeBlock(referenceBlock, vec3(0, 1, 0))
-    placed = true
-  } catch (err) {
-    debugLog('automation.woodcutting.scaffoldFailed', {
-      item: scaffoldItem.name,
-      message: err.message
-    })
-    return false
-  } finally {
-    if (typeof bot.setControlState === 'function') {
-      bot.setControlState('jump', false)
-    }
-  }
-
-  if (placed) {
-    debugLog('automation.woodcutting.scaffoldPlaced', {
-      item: scaffoldItem.name,
-      reference: positionData(referenceBlock.position)
-    })
-    if (!isWoodcuttingStopped(bot, options)) {
-      await wait(randomizedWoodcuttingDelayMs(WOODCUTTING_ACTION_DELAY_MS, options))
-    }
-  }
-
-  return placed
-}
-
-async function buildScaffoldUntilReachable (bot, block, options = {}) {
-  const debugLog = options.debugLog || (() => {})
-  const maxScaffoldBlocks = options.maxScaffoldBlocks ?? WOODCUTTING_MAX_SCAFFOLD_BLOCKS
 
   if (isBlockReachableForDig(bot, block)) return true
 
-  for (let placedBlocks = 0; placedBlocks < maxScaffoldBlocks; placedBlocks++) {
-    if (isWoodcuttingStopped(bot, options)) return false
-    const placed = await placeScaffoldBelowBot(bot, options)
-    if (!placed) break
-    if (isBlockReachableForDig(bot, block)) return true
-  }
-
   debugLog('automation.woodcutting.unreachableLog', {
     block: block.name,
-    position: positionData(block.position),
-    maxScaffoldBlocks
+    position: positionData(block.position)
   })
   return isBlockReachableForDig(bot, block)
 }
@@ -1012,7 +914,7 @@ async function cutTreeLog (bot, treeLog, options = {}) {
     ignoreTreeLog(bot, treeLog, options, 'path-failed')
     return false
   }
-  const reachable = await buildScaffoldUntilReachable(bot, treeLog, options)
+  const reachable = await ensureLogReachable(bot, treeLog, options)
   if (isWoodcuttingStopped(bot, options)) return false
   if (!reachable) {
     ignoreTreeLog(bot, treeLog, options, 'unreachable')

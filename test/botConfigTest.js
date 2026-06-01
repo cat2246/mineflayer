@@ -1567,7 +1567,7 @@ describe('holocraft bot config', function () {
     assert.deepStrictEqual(events, [['toggleNightSafety']])
   })
 
-  it('lists farming, wild roaming, and mining in the default automation menu', async () => {
+  it('lists farming, wild roaming, pyro farming, and mining in the default automation menu', async () => {
     const { createAutomationManager } = require('../bot')
     const events = []
     const bot = new EventEmitter()
@@ -1583,6 +1583,9 @@ describe('holocraft bot config', function () {
       startWildRoamingAutomation: () => ({
         stop: () => events.push(['stop', 'wild'])
       }),
+      startPyroFarmingAutomation: () => ({
+        stop: () => events.push(['stop', 'pyro'])
+      }),
       startMiningAutomation: () => ({
         stop: () => events.push(['stop', 'mining'])
       })
@@ -1592,6 +1595,7 @@ describe('holocraft bot config', function () {
       { name: 'Wood cutting' },
       { name: 'Farming' },
       { name: 'Wild roaming' },
+      { name: 'Pyro Farming' },
       { name: 'Mining' }
     ])
 
@@ -1763,6 +1767,43 @@ describe('holocraft bot config', function () {
       ['debug', 'automation.pauseForNightSafety', 'Mining'],
       ['start', 2],
       ['debug', 'automation.resumeAfterNightSafety', 'Mining']
+    ])
+  })
+
+  it('pauses and resumes pyro farming after night safety', async () => {
+    const { createAutomationManager } = require('../bot')
+    const events = []
+    const bot = new EventEmitter()
+    let starts = 0
+    const automationManager = createAutomationManager(bot, {
+      output: () => {},
+      debugLog: (event, data) => events.push(['debug', event, data?.name]),
+      automations: [
+        {
+          name: 'Pyro Farming',
+          resumeAfterNightSafety: true,
+          start: () => {
+            starts++
+            events.push(['start', starts])
+            return {
+              stop: () => events.push(['stop', starts])
+            }
+          }
+        }
+      ]
+    })
+
+    await automationManager.startByIndex(0)
+    assert.strictEqual(automationManager.pauseActiveForNightSafety(), true)
+    assert.strictEqual(await automationManager.resumePausedAfterNightSafety(), true)
+
+    assert.deepStrictEqual(events, [
+      ['start', 1],
+      ['debug', 'automation.start', 'Pyro Farming'],
+      ['stop', 1],
+      ['debug', 'automation.pauseForNightSafety', 'Pyro Farming'],
+      ['start', 2],
+      ['debug', 'automation.resumeAfterNightSafety', 'Pyro Farming']
     ])
   })
 
@@ -2115,10 +2156,10 @@ describe('holocraft bot config', function () {
     assert(events.some(event => event[0] === 'whisper' && event[2].includes('need food')))
   })
 
-  it('unloads inventory into a nearby chest', async () => {
+  it('unloads inventory into a nearby trapped chest', async () => {
     const { createFollowController } = require('../bot')
     const events = []
-    const chestBlock = block('chest', 1, 64, 0)
+    const chestBlock = block('trapped_chest', 1, 64, 0)
     const item = { name: 'diamond', type: 264, metadata: 0, count: 3 }
     const chest = {
       deposit: async (type, metadata, count) => events.push(['deposit', type, metadata, count]),
@@ -2144,17 +2185,17 @@ describe('holocraft bot config', function () {
 
     assert.strictEqual(result.ok, true)
     assert.deepStrictEqual(events, [
-      ['openContainer', 'chest'],
+      ['openContainer', 'trapped_chest'],
       ['deposit', 264, 0, 3],
       ['close']
     ])
   })
 
-  it('tries another nearby chest when the first unload chest is full', async () => {
+  it('tries another nearby trapped chest when the first unload chest is full', async () => {
     const { createFollowController } = require('../bot')
     const events = []
-    const fullChestBlock = block('chest', 1, 64, 0)
-    const openChestBlock = block('chest', 2, 64, 0)
+    const fullChestBlock = block('trapped_chest', 1, 64, 0)
+    const openChestBlock = block('trapped_chest', 2, 64, 0)
     const item = { name: 'diamond', type: 264, metadata: 0, count: 3 }
     const fullChest = {
       deposit: async () => {
@@ -2590,10 +2631,10 @@ describe('holocraft bot config', function () {
     assert.strictEqual(bot.inventory.slots[45], null)
   })
 
-  it('places a scaffold block when a tree log is too high to reach', async () => {
+  it('does not place scaffold blocks when a tree log is too high to reach', async () => {
     const { cutTreeLog } = require('../bot')
     const events = []
-    let canReachLog = false
+    const entries = []
     const treeLog = block('oak_log', 0, 72, 0)
     const bot = blockBot([
       treeLog,
@@ -2601,30 +2642,47 @@ describe('holocraft bot config', function () {
       block('dirt', 0, 63, 0)
     ], events)
     bot.inventory.items = () => [{ name: 'dirt' }]
-    bot.canDigBlock = () => canReachLog
+    bot.canDigBlock = () => false
     bot.pathfinder = {
       goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
     }
     bot.setControlState = (control, state) => events.push(['control', control, state])
     bot.placeBlock = async (referenceBlock, faceVector) => {
       events.push(['placeBlock', referenceBlock.name, faceVector.x, faceVector.y, faceVector.z])
-      canReachLog = true
-      bot.entity.position = combatPosition(0, 68, 0)
     }
 
-    await cutTreeLog(bot, treeLog, {
+    const cut = await cutTreeLog(bot, treeLog, {
+      debugLog: (event, data) => entries.push({ event, data }),
+      sleep: async () => {}
+    })
+
+    assert.strictEqual(cut, false)
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalNearXZ', 0, undefined, 0]
+    ])
+    assert(entries.some(entry => entry.event === 'automation.woodcutting.unreachableLog'))
+  })
+
+  it('uses normal survival reach when deciding whether a tree log can be cut', async () => {
+    const { cutTreeLog } = require('../bot')
+    const events = []
+    const treeLog = block('oak_log', 0, 69, 0)
+    const bot = blockBot([
+      treeLog,
+      block('oak_leaves', 1, 71, 0)
+    ], events)
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+    }
+
+    const cut = await cutTreeLog(bot, treeLog, {
       debugLog: () => {},
       sleep: async () => {}
     })
 
+    assert.strictEqual(cut, true)
     assert.deepStrictEqual(events, [
-      ['goto', 'GoalNearXZ', 0, undefined, 0],
-      ['equip', 'dirt', 'hand'],
-      ['control', 'jump', true],
-      ['placeBlock', 'dirt', 0, 1, 0],
-      ['control', 'jump', false],
-      ['control', 'sprint', false],
-      ['control', 'jump', false],
+      ['goto', 'GoalGetToBlock', 0, 69, 0],
       ['dig', 'oak_log']
     ])
   })
@@ -2645,7 +2703,6 @@ describe('holocraft bot config', function () {
 
     const cut = await cutTreeLog(bot, treeLog, {
       debugLog: (event, data) => entries.push({ event, data }),
-      maxScaffoldBlocks: 0,
       sleep: async () => {}
     })
 
@@ -2752,7 +2809,7 @@ describe('holocraft bot config', function () {
     ])
   })
 
-  it('temporarily skips unreachable logs when no scaffold block is available', async () => {
+  it('temporarily skips unreachable logs while wood cutting', async () => {
     const { runWoodCuttingCycle } = require('../bot')
     const events = []
     const entries = []
@@ -2958,7 +3015,7 @@ describe('holocraft bot config', function () {
     const { depositWoodAtHome } = require('../bot')
     const events = []
     const sleeps = []
-    const chest = block('chest', 1, 64, 0)
+    const chest = block('trapped_chest', 1, 64, 0)
     const bot = blockBot([chest], events)
     bot.chat = message => events.push(['chat', message])
     bot.inventory.items = () => [{ name: 'oak_log', type: 17, count: 3 }]
@@ -2982,7 +3039,7 @@ describe('holocraft bot config', function () {
     assert.deepStrictEqual(sleeps, [6500])
     assert.deepStrictEqual(events, [
       ['chat', '/home home'],
-      ['openContainer', 'chest'],
+      ['openContainer', 'trapped_chest'],
       ['deposit', 17, null, 3],
       ['close']
     ])
@@ -3184,10 +3241,10 @@ describe('holocraft bot config', function () {
     assert(entries.some(entry => entry.event === 'automation.woodcutting.physicsEnabled'))
   })
 
-  it('teleports home and deposits wood items into a nearby chest', async () => {
+  it('teleports home and deposits wood items into a nearby trapped chest', async () => {
     const { depositWoodAtHome } = require('../bot')
     const events = []
-    const chestBlock = block('chest', 1, 64, 0)
+    const chestBlock = block('trapped_chest', 1, 64, 0)
     const oakLog = { name: 'oak_log', type: 17, count: 12 }
     const stick = { name: 'stick', type: 280, count: 2 }
     const chest = {
@@ -3240,11 +3297,11 @@ describe('holocraft bot config', function () {
     })
   })
 
-  it('tries another nearby chest when wood deposit chest is full', async () => {
+  it('tries another nearby trapped chest when wood deposit chest is full', async () => {
     const { depositWoodAtHome } = require('../bot')
     const events = []
-    const fullChestBlock = block('chest', 1, 64, 0)
-    const openChestBlock = block('chest', 2, 64, 0)
+    const fullChestBlock = block('trapped_chest', 1, 64, 0)
+    const openChestBlock = block('trapped_chest', 2, 64, 0)
     const oakLog = { name: 'oak_log', type: 17, count: 12 }
     const bot = blockBot([fullChestBlock, openChestBlock], events)
     bot.inventory.items = () => [oakLog]
@@ -3278,7 +3335,7 @@ describe('holocraft bot config', function () {
     const events = []
     const door = block('oak_door', 1, 64, 0)
     const furnaceBlock = block('furnace', 2, 64, 0)
-    const chestBlock = block('chest', 3, 64, 0)
+    const chestBlock = block('trapped_chest', 3, 64, 0)
     const bedBlock = block('red_bed', 4, 64, 0)
     const rawBeef = { name: 'beef', type: 363, count: 2 }
     const coal = { name: 'coal', type: 263, count: 4 }
@@ -3578,7 +3635,7 @@ describe('holocraft bot config', function () {
   it('does not open storage repeatedly when no bed is available at home', async () => {
     const { runNightSafetyCycle } = require('../bot')
     const events = []
-    const chestBlock = block('chest', 1, 64, 0)
+    const chestBlock = block('trapped_chest', 1, 64, 0)
     const bot = blockBot([chestBlock], events)
     bot.time = { isDay: false, timeOfDay: 14000 }
     bot.chat = command => events.push(['chat', command])
@@ -3603,11 +3660,11 @@ describe('holocraft bot config', function () {
     ])
   })
 
-  it('uses the home teleport position when choosing a loot chest', async () => {
+  it('uses the home teleport position when choosing a loot trapped chest', async () => {
     const { depositLoot } = require('../bot')
     const events = []
-    const homeChest = block('chest', 1, 64, 0)
-    const otherChest = block('chest', 50, 64, 0)
+    const homeChest = block('trapped_chest', 1, 64, 0)
+    const otherChest = block('trapped_chest', 50, 64, 0)
     const oakLog = { name: 'oak_log', type: 17, count: 12 }
     const bot = blockBot([homeChest, otherChest], events)
     bot.entity.position = combatPosition(49, 64, 0)
@@ -3630,11 +3687,11 @@ describe('holocraft bot config', function () {
     ])
   })
 
-  it('tries another nearby chest when the first loot chest is full', async () => {
+  it('tries another nearby trapped chest when the first loot chest is full', async () => {
     const { depositLoot } = require('../bot')
     const events = []
-    const fullChest = block('chest', 1, 64, 0)
-    const openChest = block('chest', 2, 64, 0)
+    const fullChest = block('trapped_chest', 1, 64, 0)
+    const openChest = block('trapped_chest', 2, 64, 0)
     const oakLog = { name: 'oak_log', type: 17, count: 12 }
     const bot = blockBot([fullChest, openChest], events)
     bot.inventory.items = () => [oakLog]
@@ -3849,6 +3906,345 @@ describe('holocraft bot config', function () {
     assert(entries.some(entry => entry.event === 'automation.farming.door.retry'))
   })
 
+  it('verifies growstation flower pots through the opened PyroFarming window', async () => {
+    const { readPyroFarmMemory, verifyGrowstationBlock } = require('../bot')
+    const events = []
+    const memoryPath = tempPyroFarmMemoryPath()
+    const pot = block('flower_pot', 1, 64, 0)
+    const bot = Object.assign(new EventEmitter(), blockBot([pot], events))
+    bot.heldItem = { name: 'water_bucket' }
+    bot.unequip = async destination => {
+      events.push(['unequip', destination])
+      bot.heldItem = null
+    }
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+    }
+    bot.activateBlock = async target => {
+      events.push(['activateBlock', target.name])
+      bot.emit('windowOpen', {
+        title: 'Growstation',
+        slots: [{ name: 'flower_pot', displayName: 'Growstation' }]
+      })
+    }
+    bot.closeWindow = window => events.push(['closeWindow', String(window.title)])
+
+    const verified = await verifyGrowstationBlock(bot, pot, {
+      pyroFarmMemoryPath: memoryPath,
+      growstationVerificationTimeoutMs: 10
+    })
+
+    assert.strictEqual(verified, true)
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalNear', 1, 64, 0],
+      ['unequip', 'hand'],
+      ['activateBlock', 'flower_pot'],
+      ['closeWindow', 'Growstation']
+    ])
+    assert(readPyroFarmMemory({ pyroFarmMemoryPath: memoryPath }).growstations['overworld:1,64,0'])
+  })
+
+  it('clears stale pathfinder goals before approaching PyroFarming growstations', async () => {
+    const { readPyroFarmMemory, verifyGrowstationBlock } = require('../bot')
+    const events = []
+    const memoryPath = tempPyroFarmMemoryPath()
+    const pot = block('flower_pot', 1, 64, 0)
+    const bot = Object.assign(new EventEmitter(), blockBot([pot], events))
+    let cleared = false
+    bot.pathfinder = {
+      setGoal: goal => {
+        events.push(['setGoal', goal])
+        if (goal === null) cleared = true
+      },
+      goto: async goal => {
+        if (!cleared) throw new Error('Path was stopped before it could be completed! Thus, the desired goal was not reached.')
+        events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+      }
+    }
+    bot.activateBlock = async target => {
+      events.push(['activateBlock', target.name])
+      bot.emit('windowOpen', {
+        title: 'Growstation',
+        slots: [{ name: 'flower_pot', displayName: 'Growstation' }]
+      })
+    }
+
+    const verified = await verifyGrowstationBlock(bot, pot, {
+      pyroFarmMemoryPath: memoryPath,
+      growstationVerificationTimeoutMs: 10
+    })
+
+    assert.strictEqual(verified, true)
+    assert.deepStrictEqual(events, [
+      ['setGoal', null],
+      ['goto', 'GoalNear', 1, 64, 0],
+      ['activateBlock', 'flower_pot']
+    ])
+    assert(readPyroFarmMemory({ pyroFarmMemoryPath: memoryPath }).growstations['overworld:1,64,0'])
+  })
+
+  it('remembers normal flower pots as ignored when no Growstation window opens', async () => {
+    const { readPyroFarmMemory, verifyGrowstationBlock } = require('../bot')
+    const events = []
+    const memoryPath = tempPyroFarmMemoryPath()
+    const pot = block('flower_pot', 2, 64, 0)
+    const bot = Object.assign(new EventEmitter(), blockBot([pot], events))
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+    }
+    bot.activateBlock = async target => events.push(['activateBlock', target.name])
+
+    const verified = await verifyGrowstationBlock(bot, pot, {
+      pyroFarmMemoryPath: memoryPath,
+      growstationVerificationTimeoutMs: 0
+    })
+
+    assert.strictEqual(verified, false)
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalNear', 2, 64, 0],
+      ['activateBlock', 'flower_pot']
+    ])
+    assert(readPyroFarmMemory({ pyroFarmMemoryPath: memoryPath }).ignoredFlowerPots['overworld:2,64,0'])
+  })
+
+  it('waters remembered growstations and treats no PyroFarming message as success', async () => {
+    const { runPyroFarmingCycle, writePyroFarmMemory } = require('../bot')
+    const events = []
+    const entries = []
+    const memoryPath = tempPyroFarmMemoryPath()
+    const pot = block('flower_pot', 3, 64, 0)
+    writePyroFarmMemory({
+      version: 1,
+      growstations: {
+        'overworld:3,64,0': {
+          dimension: 'overworld',
+          position: { x: 3, y: 64, z: 0 },
+          verifiedAt: 1,
+          lastSeenAt: 1,
+          lastWateredAt: null,
+          lastFullAt: null
+        }
+      },
+      ignoredFlowerPots: {}
+    }, { pyroFarmMemoryPath: memoryPath })
+    const bot = Object.assign(new EventEmitter(), blockBot([pot], events))
+    bot.inventory.items = () => [{ name: 'water_bucket', type: 326, count: 1 }]
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+    }
+    bot.activateBlock = async target => events.push(['activateBlock', target.name])
+
+    const ran = await runPyroFarmingCycle(bot, {
+      debugLog: (event, data) => entries.push({ event, data }),
+      pyroFarmMemoryPath: memoryPath,
+      pyroWaterMessageTimeoutMs: 0
+    })
+
+    assert.strictEqual(ran, true)
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalNear', 3, 64, 0],
+      ['equip', 'water_bucket', 'hand'],
+      ['activateBlock', 'flower_pot']
+    ])
+    assert(entries.some(entry => entry.event === 'automation.pyroFarming.watered'))
+  })
+
+  it('rehydrates remembered growstation positions before reading blocks', async () => {
+    const { runPyroFarmingCycle, writePyroFarmMemory } = require('../bot')
+    const events = []
+    const memoryPath = tempPyroFarmMemoryPath()
+    const pot = block('flower_pot', 6, 64, 0)
+    writePyroFarmMemory({
+      version: 1,
+      growstations: {
+        'overworld:6,64,0': {
+          dimension: 'overworld',
+          position: { x: 6, y: 64, z: 0 },
+          verifiedAt: 1,
+          lastSeenAt: 1,
+          lastWateredAt: null,
+          lastFullAt: null
+        }
+      },
+      ignoredFlowerPots: {}
+    }, { pyroFarmMemoryPath: memoryPath })
+    const bot = Object.assign(new EventEmitter(), blockBot([pot], events))
+    bot.findBlocks = () => []
+    bot.blockAt = position => {
+      if (typeof position.floored !== 'function') throw new Error('pos.floored is not a function')
+      return position.x === 6 && position.y === 64 && position.z === 0 ? pot : null
+    }
+    bot.inventory.items = () => [{ name: 'water_bucket', type: 326, count: 1 }]
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+    }
+    bot.activateBlock = async target => events.push(['activateBlock', target.name])
+
+    const ran = await runPyroFarmingCycle(bot, {
+      pyroFarmMemoryPath: memoryPath,
+      pyroWaterMessageTimeoutMs: 0,
+      debugLog: () => {}
+    })
+
+    assert.strictEqual(ran, true)
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalNear', 6, 64, 0],
+      ['equip', 'water_bucket', 'hand'],
+      ['activateBlock', 'flower_pot']
+    ])
+  })
+
+  it('records full growstations when PyroFarming says the water is already full', async () => {
+    const { readPyroFarmMemory, runPyroFarmingCycle, writePyroFarmMemory } = require('../bot')
+    const events = []
+    const entries = []
+    const memoryPath = tempPyroFarmMemoryPath()
+    const pot = block('flower_pot', 4, 64, 0)
+    writePyroFarmMemory({
+      version: 1,
+      growstations: {
+        'overworld:4,64,0': {
+          dimension: 'overworld',
+          position: { x: 4, y: 64, z: 0 },
+          verifiedAt: 1,
+          lastSeenAt: 1,
+          lastWateredAt: null,
+          lastFullAt: null
+        }
+      },
+      ignoredFlowerPots: {}
+    }, { pyroFarmMemoryPath: memoryPath })
+    const bot = Object.assign(new EventEmitter(), blockBot([pot], events))
+    bot.inventory.items = () => [{ name: 'water_bucket', type: 326, count: 1 }]
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+    }
+    bot.activateBlock = async target => {
+      events.push(['activateBlock', target.name])
+      bot.emit('message', 'PyroFarming > Your Growstation is already full of water!')
+    }
+
+    const ran = await runPyroFarmingCycle(bot, {
+      debugLog: (event, data) => entries.push({ event, data }),
+      pyroFarmMemoryPath: memoryPath,
+      pyroWaterMessageTimeoutMs: 10
+    })
+
+    assert.strictEqual(ran, true)
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalNear', 4, 64, 0],
+      ['equip', 'water_bucket', 'hand'],
+      ['activateBlock', 'flower_pot']
+    ])
+    assert(entries.some(entry => entry.event === 'automation.pyroFarming.full'))
+    assert(readPyroFarmMemory({ pyroFarmMemoryPath: memoryPath }).growstations['overworld:4,64,0'].lastFullAt)
+  })
+
+  it('refills an empty bucket from nearby water before watering growstations', async () => {
+    const { runPyroFarmingCycle, writePyroFarmMemory } = require('../bot')
+    const events = []
+    const memoryPath = tempPyroFarmMemoryPath()
+    const pot = block('flower_pot', 5, 64, 0)
+    const water = block('water', 0, 63, 1)
+    let items = [{ name: 'bucket', type: 325, count: 1 }]
+    writePyroFarmMemory({
+      version: 1,
+      growstations: {
+        'overworld:5,64,0': {
+          dimension: 'overworld',
+          position: { x: 5, y: 64, z: 0 },
+          verifiedAt: 1,
+          lastSeenAt: 1,
+          lastWateredAt: null,
+          lastFullAt: null
+        }
+      },
+      ignoredFlowerPots: {}
+    }, { pyroFarmMemoryPath: memoryPath })
+    const bot = Object.assign(new EventEmitter(), blockBot([pot, water], events))
+    bot.inventory.items = () => items
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+    }
+    bot.activateBlock = async target => {
+      events.push(['activateBlock', target.name])
+      if (target.name === 'water') items = [{ name: 'water_bucket', type: 326, count: 1 }]
+    }
+
+    const ran = await runPyroFarmingCycle(bot, {
+      pyroFarmMemoryPath: memoryPath,
+      pyroWaterMessageTimeoutMs: 0,
+      debugLog: () => {}
+    })
+
+    assert.strictEqual(ran, true)
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalNear', 0, 63, 1],
+      ['equip', 'bucket', 'hand'],
+      ['activateBlock', 'water'],
+      ['goto', 'GoalNear', 5, 64, 0],
+      ['equip', 'water_bucket', 'hand'],
+      ['activateBlock', 'flower_pot']
+    ])
+  })
+
+  it('takes water from source blocks and waits for the bucket to refill', async () => {
+    const { runPyroFarmingCycle, writePyroFarmMemory } = require('../bot')
+    const events = []
+    const memoryPath = tempPyroFarmMemoryPath()
+    const pot = block('flower_pot', 7, 64, 0)
+    const flowingWater = block('water', 0, 63, 1)
+    flowingWater.properties = { level: 4 }
+    const sourceWater = block('water', 2, 63, 1)
+    sourceWater.properties = { level: 0 }
+    let items = [{ name: 'bucket', type: 325, count: 1 }]
+    writePyroFarmMemory({
+      version: 1,
+      growstations: {
+        'overworld:7,64,0': {
+          dimension: 'overworld',
+          position: { x: 7, y: 64, z: 0 },
+          verifiedAt: 1,
+          lastSeenAt: 1,
+          lastWateredAt: null,
+          lastFullAt: null
+        }
+      },
+      ignoredFlowerPots: {}
+    }, { pyroFarmMemoryPath: memoryPath })
+    const bot = Object.assign(new EventEmitter(), blockBot([pot, flowingWater, sourceWater], events))
+    bot.inventory.items = () => items
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+    }
+    bot.lookAt = async point => events.push(['lookAt', point.x, point.y, point.z])
+    bot.activateItem = async () => {
+      events.push(['activateItem'])
+      setTimeout(() => {
+        items = [{ name: 'water_bucket', type: 326, count: 1 }]
+      }, 5)
+    }
+    bot.activateBlock = async target => events.push(['activateBlock', target.name])
+
+    const ran = await runPyroFarmingCycle(bot, {
+      pyroFarmMemoryPath: memoryPath,
+      pyroRefillTimeoutMs: 50,
+      pyroWaterMessageTimeoutMs: 0,
+      debugLog: () => {}
+    })
+
+    assert.strictEqual(ran, true)
+    assert.deepStrictEqual(events, [
+      ['goto', 'GoalNear', 2, 63, 1],
+      ['equip', 'bucket', 'hand'],
+      ['lookAt', 2.5, 63.5, 1.5],
+      ['activateItem'],
+      ['goto', 'GoalNear', 7, 64, 0],
+      ['equip', 'water_bucket', 'hand'],
+      ['activateBlock', 'flower_pot']
+    ])
+  })
+
   it('keeps cutting wood until four stacks are collected', async () => {
     const { runWoodCuttingQuotaTask } = require('../bot')
     const events = []
@@ -4018,7 +4414,7 @@ describe('holocraft bot config', function () {
   it('teleports home and deposits mined items when mining inventory is full', async () => {
     const { runMiningCycle } = require('../bot')
     const events = []
-    const chestBlock = block('chest', 1, 64, 0)
+    const chestBlock = block('trapped_chest', 1, 64, 0)
     const coal = { name: 'coal', type: 263, count: 12 }
     const rawIron = { name: 'raw_iron', type: 1001, count: 5 }
     const cobblestone = { name: 'cobblestone', type: 4, count: 64 }
@@ -4495,10 +4891,10 @@ describe('holocraft bot config', function () {
     ])
   })
 
-  it('gears up from a nearby chest during the day when required items are missing', async () => {
+  it('gears up from a nearby trapped chest during the day when required items are missing', async () => {
     const { runDayGearCycle } = require('../bot')
     const events = []
-    const chestBlock = block('chest', 3, 64, 0)
+    const chestBlock = block('trapped_chest', 3, 64, 0)
     const sword = { name: 'iron_sword', type: 267, count: 1 }
     const axe = { name: 'iron_axe', type: 258, count: 1 }
     const pickaxe = { name: 'iron_pickaxe', type: 257, count: 1 }
@@ -4539,11 +4935,11 @@ describe('holocraft bot config', function () {
     ])
   })
 
-  it('tries multiple nearby chests while taking daytime gear', async () => {
+  it('tries multiple nearby trapped chests while taking daytime gear', async () => {
     const { runDayGearCycle } = require('../bot')
     const events = []
-    const firstChestBlock = block('chest', 1, 64, 0)
-    const secondChestBlock = block('chest', 2, 64, 0)
+    const firstChestBlock = block('trapped_chest', 1, 64, 0)
+    const secondChestBlock = block('trapped_chest', 2, 64, 0)
     const sword = { name: 'iron_sword', type: 267, count: 1 }
     const axe = { name: 'iron_axe', type: 258, count: 1 }
     const pickaxe = { name: 'iron_pickaxe', type: 257, count: 1 }
@@ -4583,7 +4979,7 @@ describe('holocraft bot config', function () {
     ])
   })
 
-  it('opens the cached chest first when daytime gear memory knows where an item is', async () => {
+  it('opens the cached trapped chest first when daytime gear memory knows where an item is', async () => {
     const { runDayGearCycle } = require('../bot')
     const events = []
     const memoryPath = tempContainerMemoryPath()
@@ -4591,21 +4987,21 @@ describe('holocraft bot config', function () {
       version: 1,
       containers: {
         'overworld:1,64,0': {
-          name: 'chest',
+          name: 'trapped_chest',
           position: { x: 1, y: 64, z: 0 },
           searchedAt: 1,
           items: [{ name: 'dirt', type: 3, count: 64 }]
         },
         'overworld:2,64,0': {
-          name: 'chest',
+          name: 'trapped_chest',
           position: { x: 2, y: 64, z: 0 },
           searchedAt: 1,
           items: [{ name: 'iron_axe', type: 258, count: 1 }]
         }
       }
     }))
-    const firstChestBlock = block('chest', 1, 64, 0)
-    const secondChestBlock = block('chest', 2, 64, 0)
+    const firstChestBlock = block('trapped_chest', 1, 64, 0)
+    const secondChestBlock = block('trapped_chest', 2, 64, 0)
     const bot = blockBot([firstChestBlock, secondChestBlock], events)
     bot.registry = { foodsByName: { bread: { foodPoints: 5, saturation: 6 } } }
     bot.inventory.items = () => [
@@ -4637,7 +5033,7 @@ describe('holocraft bot config', function () {
     ])
   })
 
-  it('does not reopen searched house chests when memory knows the missing gear is not there', async () => {
+  it('does not reopen searched house trapped chests when memory knows the missing gear is not there', async () => {
     const { runDayGearCycle } = require('../bot')
     const events = []
     const memoryPath = tempContainerMemoryPath()
@@ -4645,20 +5041,20 @@ describe('holocraft bot config', function () {
       version: 1,
       containers: {
         'overworld:1,64,0': {
-          name: 'chest',
+          name: 'trapped_chest',
           position: { x: 1, y: 64, z: 0 },
           searchedAt: 1,
           items: [{ name: 'dirt', type: 3, count: 64 }]
         },
         'overworld:2,64,0': {
-          name: 'chest',
+          name: 'trapped_chest',
           position: { x: 2, y: 64, z: 0 },
           searchedAt: 1,
           items: [{ name: 'bread', type: 297, count: 64 }]
         }
       }
     }))
-    const bot = blockBot([block('chest', 1, 64, 0), block('chest', 2, 64, 0)], events)
+    const bot = blockBot([block('trapped_chest', 1, 64, 0), block('trapped_chest', 2, 64, 0)], events)
     bot.registry = { foodsByName: { bread: { foodPoints: 5, saturation: 6 } } }
     bot.inventory.items = () => [
       { name: 'iron_sword', type: 267, count: 1 },
@@ -4688,11 +5084,11 @@ describe('holocraft bot config', function () {
     assert.deepStrictEqual(events, [])
   })
 
-  it('finishes daytime gear search after every house chest was searched without finding the item', async () => {
+  it('finishes daytime gear search after every house trapped chest was searched without finding the item', async () => {
     const { runDayGearCycle } = require('../bot')
     const events = []
     const memoryPath = tempContainerMemoryPath()
-    const bot = blockBot([block('chest', 1, 64, 0), block('chest', 2, 64, 0)], events)
+    const bot = blockBot([block('trapped_chest', 1, 64, 0), block('trapped_chest', 2, 64, 0)], events)
     bot.registry = { foodsByName: { bread: { foodPoints: 5, saturation: 6 } } }
     bot.inventory.items = () => [
       { name: 'iron_sword', type: 267, count: 1 },
@@ -4727,10 +5123,10 @@ describe('holocraft bot config', function () {
     ])
   })
 
-  it('only searches house containers inside the configured home cube', async () => {
+  it('only searches house trapped chests inside the configured home cube', async () => {
     const { runDayGearCycle } = require('../bot')
     const events = []
-    const bot = blockBot([block('chest', 5, 64, 0), block('chest', 12, 64, 0)], events)
+    const bot = blockBot([block('trapped_chest', 5, 64, 0), block('trapped_chest', 12, 64, 0)], events)
     bot.registry = { foodsByName: { bread: { foodPoints: 5, saturation: 6 } } }
     bot.inventory.items = () => [
       { name: 'iron_sword', type: 267, count: 1 },
@@ -4769,7 +5165,7 @@ describe('holocraft bot config', function () {
   it('tops up daytime gear without exceeding configured maximums', async () => {
     const { runDayGearCycle } = require('../bot')
     const events = []
-    const chestBlock = block('chest', 3, 64, 0)
+    const chestBlock = block('trapped_chest', 3, 64, 0)
     const arrow = { name: 'arrow', type: 262, count: 64 }
     const dirt = { name: 'dirt', type: 3, count: 64 }
     const bread = { name: 'bread', type: 297, count: 64 }
@@ -4812,7 +5208,7 @@ describe('holocraft bot config', function () {
   it('waits between opening, using, and closing containers', async () => {
     const { visitNearbyContainers } = require('../bot')
     const events = []
-    const bot = blockBot([block('chest', 1, 64, 0)], events)
+    const bot = blockBot([block('trapped_chest', 1, 64, 0)], events)
     bot.openContainer = async target => {
       events.push(['openContainer', target.position.x])
       return {
@@ -4841,11 +5237,40 @@ describe('holocraft bot config', function () {
     ])
   })
 
-  it('opens only one half of a large chest candidate', async () => {
+  it('only auto-searches trapped chests when looking for containers', async () => {
     const { visitNearbyContainers } = require('../bot')
     const events = []
-    const leftChest = block('chest', 1, 64, 0)
-    const rightChest = block('chest', 2, 64, 0)
+    const bot = blockBot([
+      block('chest', 1, 64, 0),
+      block('barrel', 2, 64, 0),
+      block('trapped_chest', 3, 64, 0)
+    ], events)
+    bot.openContainer = async target => {
+      events.push(['openContainer', target.name, target.position.x])
+      return {
+        containerItems: () => [],
+        close: () => events.push(['close', target.name, target.position.x])
+      }
+    }
+
+    const visited = await visitNearbyContainers(bot, {
+      containerInteractionDelayMs: 0,
+      containerMemoryPath: tempContainerMemoryPath(),
+      houseOnly: false
+    }, async () => true)
+
+    assert.strictEqual(visited, true)
+    assert.deepStrictEqual(events, [
+      ['openContainer', 'trapped_chest', 3],
+      ['close', 'trapped_chest', 3]
+    ])
+  })
+
+  it('opens only one half of a large trapped chest candidate', async () => {
+    const { visitNearbyContainers } = require('../bot')
+    const events = []
+    const leftChest = block('trapped_chest', 1, 64, 0)
+    const rightChest = block('trapped_chest', 2, 64, 0)
     leftChest.properties = { facing: 'north', type: 'left' }
     rightChest.properties = { facing: 'north', type: 'right' }
     const bot = blockBot([leftChest, rightChest], events)
@@ -4879,7 +5304,7 @@ describe('holocraft bot config', function () {
   it('walks to the container front and looks at it before opening', async () => {
     const { visitNearbyContainers } = require('../bot')
     const events = []
-    const chestBlock = block('chest', 1, 64, 0)
+    const chestBlock = block('trapped_chest', 1, 64, 0)
     chestBlock.properties = { facing: 'east' }
     const bot = blockBot([chestBlock], events)
     bot.pathfinder = {
@@ -4914,7 +5339,7 @@ describe('holocraft bot config', function () {
   it('does not open a container when line of sight is blocked', async () => {
     const { visitNearbyContainers } = require('../bot')
     const events = []
-    const chestBlock = block('chest', 1, 64, 0)
+    const chestBlock = block('trapped_chest', 1, 64, 0)
     const bot = blockBot([chestBlock], events)
     bot.lookAt = async (point, force) => events.push(['lookAt', point.x, point.y, point.z, force])
     bot.world = {
@@ -4937,7 +5362,7 @@ describe('holocraft bot config', function () {
     assert.strictEqual(visited, false)
     assert.deepStrictEqual(events, [
       ['lookAt', 1.5, 64.5, 0.5, true],
-      ['debug', 'container.blockedLineOfSight', 'chest']
+      ['debug', 'container.blockedLineOfSight', 'trapped_chest']
     ])
   })
 
@@ -5534,6 +5959,28 @@ describe('holocraft bot config', function () {
     assert.deepStrictEqual(entry.data, { hello: 'world' })
   })
 
+  it('rotates debug logs before appending when the active log is too large', () => {
+    const { createDebugLogger } = require('../bot')
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'debug-log-rotation-'))
+    const logPath = path.join(tempDir, 'bot-debug.log')
+    fs.writeFileSync(logPath, 'active log that is already too large\n')
+    fs.writeFileSync(`${logPath}.1`, 'older one\n')
+    fs.writeFileSync(`${logPath}.2`, 'older two\n')
+    fs.writeFileSync(`${logPath}.3`, 'oldest removed\n')
+
+    const logger = createDebugLogger(fs, logPath, {
+      maxBytes: 10,
+      maxFiles: 3
+    })
+
+    logger('rotated', { ok: true })
+
+    assert(fs.readFileSync(logPath, 'utf8').includes('"event":"rotated"'))
+    assert.strictEqual(fs.readFileSync(`${logPath}.1`, 'utf8'), 'active log that is already too large\n')
+    assert.strictEqual(fs.readFileSync(`${logPath}.2`, 'utf8'), 'older one\n')
+    assert.strictEqual(fs.readFileSync(`${logPath}.3`, 'utf8'), 'older two\n')
+  })
+
   it('builds a Windows popup terminal command for the log viewer', () => {
     const { buildWindowsLogTerminalArgs } = require('../bot')
 
@@ -5788,6 +6235,10 @@ function sequenceRandom (values) {
 
 function tempContainerMemoryPath () {
   return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'container-memory-')), 'container-memory.txt')
+}
+
+function tempPyroFarmMemoryPath () {
+  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pyrofarm-memory-')), 'pyrofarm-memory.txt')
 }
 
 function tempPlacesPath () {

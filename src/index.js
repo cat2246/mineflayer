@@ -20,6 +20,7 @@ module.exports = {
   ...require('./mining'),
   ...require('./nightSafety'),
   ...require('./places'),
+  ...require('./pyroFarming'),
   ...require('./survival'),
   ...require('./viewer'),
   ...require('./wildRoaming'),
