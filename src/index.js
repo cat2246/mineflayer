@@ -19,6 +19,7 @@ module.exports = {
   ...require('./knockbackPause'),
   ...require('./logTerminal'),
   ...require('./logViewer'),
+  ...require('./maintenanceAutomation'),
   ...require('./mining'),
   ...require('./nightSafety'),
   ...require('./places'),

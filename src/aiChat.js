@@ -194,6 +194,21 @@ function defaultToolsText () {
     '```json',
     '{"tool":"record_missing_function","args":{"capability":"craft wooden doors","reason":"Player asked the bot to craft a door from wood.","suggestedTool":"craft_item"}}',
     '```',
+    '',
+    '### get_current_coordinates',
+    '',
+    'Use when a player asks where the bot is, what its current coordinates are, or asks for its position.',
+    '',
+    'Behavior:',
+    '',
+    '- Reads the bot current in-game position.',
+    '- Sends the position back to the model so it can answer the player.',
+    '',
+    'Example:',
+    '',
+    '```json',
+    '{"tool":"get_current_coordinates","args":{}}',
+    '```',
     ''
   ].join('\n')
 }
@@ -813,6 +828,43 @@ function executeRecordMissingFunction (request, args = {}, options = {}) {
   }
 }
 
+function executeGetCurrentCoordinates (bot, request, options = {}) {
+  const debugLog = options.debugLog || (() => {})
+  const position = bot.entity?.position
+  if (!position) {
+    return {
+      ok: false,
+      reply: 'I cannot read my current coordinates right now.',
+      toolResult: {
+        tool: 'get_current_coordinates',
+        ok: false,
+        reason: 'position-unavailable'
+      }
+    }
+  }
+
+  const coordinates = {
+    x: position.x,
+    y: position.y,
+    z: position.z
+  }
+
+  debugLog('aiChat.tool.coordinates', {
+    username: request.username,
+    position: coordinates
+  })
+
+  return {
+    ok: true,
+    reply: `My coordinates are x ${coordinates.x}, y ${coordinates.y}, z ${coordinates.z}.`,
+    toolResult: {
+      tool: 'get_current_coordinates',
+      ok: true,
+      position: coordinates
+    }
+  }
+}
+
 function executeUnknownTool (toolName, toolCall, request, options = {}) {
   const debugLog = options.debugLog || (() => {})
   const capability = `Unknown tool: ${toolName || 'unnamed'}`
@@ -873,6 +925,10 @@ async function executeAgentTool (bot, toolCall, request, options = {}) {
 
   if (toolName === 'record_missing_function') {
     return executeRecordMissingFunction(request, toolCall.args, options)
+  }
+
+  if (toolName === 'get_current_coordinates') {
+    return executeGetCurrentCoordinates(bot, request, options)
   }
 
   return executeUnknownTool(toolName, toolCall, request, options)

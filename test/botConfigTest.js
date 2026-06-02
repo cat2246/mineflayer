@@ -261,6 +261,20 @@ describe('holocraft bot config', function () {
     assert.deepStrictEqual(messages, ['/login PqOwIeUr0192'])
   })
 
+  it('does not throw login errors when chat is unavailable', async () => {
+    const { loginToServer, joinSurvivalWorld } = require('../bot')
+    const sleeps = []
+    const bot = {}
+
+    assert.strictEqual(await loginToServer(bot, {
+      sleep: async ms => sleeps.push(ms)
+    }), false)
+    assert.strictEqual(await joinSurvivalWorld(bot, {
+      sleep: async ms => sleeps.push(ms)
+    }), false)
+    assert.deepStrictEqual(sleeps, [])
+  })
+
   it('logs into the server and enables physics before joining Survival on spawn', async () => {
     const { attachEventLogging } = require('../bot')
     const bot = new EventEmitter()
@@ -536,6 +550,34 @@ describe('holocraft bot config', function () {
     bot.emit('playerJoined', { username: 'PokiMoki82719' })
 
     assert.deepStrictEqual(messages, [])
+  })
+
+  it('does not greet formatted non-player names with illegal chat characters', async () => {
+    const { attachEventLogging } = require('../bot')
+    const bot = new EventEmitter()
+    const messages = []
+    const entries = []
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => messages.push(message)
+
+    attachEventLogging(bot, {
+      debugLog: (event, data) => entries.push({ event, data }),
+      loginToServer: async () => false,
+      joinSurvivalWorld: async () => {},
+      playerGreetingStartupDelayMs: 0,
+      startViewer: () => {}
+    })
+
+    bot.emit('spawn')
+    await new Promise(resolve => setImmediate(resolve))
+    bot.emit('playerJoined', { username: '§0Blacksmith' })
+
+    assert.deepStrictEqual(messages, [])
+    assert(entries.some(entry =>
+      entry.event === 'playerJoined.greetingSkipped' &&
+      entry.data.username === '§0Blacksmith' &&
+      entry.data.reason === 'unsafe-username'
+    ))
   })
 
   it('recognizes noisy particle partial-read protocol errors', () => {
@@ -2913,6 +2955,39 @@ describe('holocraft bot config', function () {
     ])
     assert(missing.includes('Unknown tool: craft_item'))
     assert(missing.includes('oak_door'))
+  })
+
+  it('reports current coordinates through a Codex tool call', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const requests = []
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.entity = { position: combatPosition(12.7, 64, -3.2) }
+    bot.chat = message => events.push(['chat', message])
+
+    attachAiChat(bot, {
+      memoryEnabled: false,
+      toolsEnabled: false,
+      runCodex: async request => {
+        requests.push(request)
+        if (request.toolResult) {
+          assert.deepStrictEqual(request.toolResult.position, { x: 12.7, y: 64, z: -3.2 })
+          return 'I am at x 12.7, y 64, z -3.2. Lost? Same.'
+        }
+        return '{"tool":"get_current_coordinates","args":{}}'
+      }
+    })
+
+    bot.emit('chat', 'Alex', 'PokiMoki, what is your coordinate right now?')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [
+      ['chat', '@Alex I am at x 12.7, y 64, z -3.2. Lost? Same.']
+    ])
+    assert.strictEqual(requests.length, 2)
+    assert.strictEqual(requests[1].toolResult.tool, 'get_current_coordinates')
   })
 
   it('executes a Codex tool call to meet a player at spawn', async () => {
@@ -6978,6 +7053,151 @@ describe('holocraft bot config', function () {
 
     controller.stop()
     assert.deepStrictEqual(cleared, [timers[0]])
+  })
+
+  it('detects open maintenance work from error and missing function files', () => {
+    const { hasMaintenanceWork } = require('../bot')
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-maintenance-work-'))
+    const errorReviewPath = path.join(tempDir, 'error-review.md')
+    const missingFunctionsPath = path.join(tempDir, 'MISSING_FUNCTIONS.md')
+
+    fs.writeFileSync(errorReviewPath, [
+      '# Bot Error Review',
+      '',
+      '## Open Items',
+      '',
+      '<!-- bot-error:abc -->',
+      '## 2026-06-03T00:00:00.000Z - aiChat.error'
+    ].join('\n'))
+    fs.writeFileSync(missingFunctionsPath, [
+      '# Missing Bot Functions',
+      '',
+      '## Open Items',
+      ''
+    ].join('\n'))
+
+    assert.strictEqual(hasMaintenanceWork({ errorReviewPath, missingFunctionsPath }), true)
+
+    fs.writeFileSync(errorReviewPath, [
+      '# Bot Error Review',
+      '',
+      '## Open Items',
+      '',
+      '## Resolved Items',
+      '',
+      '<!-- bot-error:abc -->'
+    ].join('\n'))
+
+    assert.strictEqual(hasMaintenanceWork({ errorReviewPath, missingFunctionsPath }), false)
+  })
+
+  it('runs a maintenance cycle by stopping, fixing, and restarting the bot', async () => {
+    const { runMaintenanceCycle } = require('../bot')
+    const calls = []
+    const result = await runMaintenanceCycle({
+      hasMaintenanceWork: () => true,
+      stopBot: async () => calls.push('stop'),
+      runFixer: async () => calls.push('fix'),
+      startBot: async () => {
+        calls.push('start')
+        return { pid: 1234 }
+      },
+      logger: () => {}
+    })
+
+    assert.deepStrictEqual(calls, ['stop', 'fix', 'start'])
+    assert.strictEqual(result.fixed, true)
+    assert.strictEqual(result.started.pid, 1234)
+  })
+
+  it('starts the bot during maintenance when there is no work to fix', async () => {
+    const { runMaintenanceCycle } = require('../bot')
+    const calls = []
+    const result = await runMaintenanceCycle({
+      hasMaintenanceWork: () => false,
+      stopBot: async () => calls.push('stop'),
+      runFixer: async () => calls.push('fix'),
+      startBot: async () => {
+        calls.push('start')
+        return { pid: 4321 }
+      },
+      logger: () => {}
+    })
+
+    assert.deepStrictEqual(calls, ['stop', 'start'])
+    assert.strictEqual(result.fixed, false)
+    assert.strictEqual(result.started.pid, 4321)
+  })
+
+  it('schedules maintenance automation every hour', () => {
+    const { attachMaintenanceAutomation, MAINTENANCE_INTERVAL_MS } = require('../bot')
+    const timers = []
+    const cleared = []
+    let runs = 0
+    const controller = attachMaintenanceAutomation({
+      clearInterval: timer => cleared.push(timer),
+      runMaintenanceCycle: async () => {
+        runs++
+        return { ok: true }
+      },
+      runImmediately: false,
+      setInterval: (callback, delayMs) => {
+        const timer = { callback, delayMs, unref: () => { timer.unrefCalled = true } }
+        timers.push(timer)
+        return timer
+      }
+    })
+
+    assert.strictEqual(timers.length, 1)
+    assert.strictEqual(timers[0].delayMs, MAINTENANCE_INTERVAL_MS)
+    assert.strictEqual(timers[0].unrefCalled, true)
+    timers[0].callback()
+    assert.strictEqual(runs, 1)
+
+    controller.stop()
+    assert.deepStrictEqual(cleared, [timers[0]])
+  })
+
+  it('can keep the standalone maintenance timer referenced', () => {
+    const { attachMaintenanceAutomation } = require('../bot')
+    const timers = []
+    const controller = attachMaintenanceAutomation({
+      runMaintenanceCycle: async () => ({ ok: true }),
+      runImmediately: false,
+      setInterval: (callback, delayMs) => {
+        const timer = { callback, delayMs, unref: () => { timer.unrefCalled = true } }
+        timers.push(timer)
+        return timer
+      },
+      unrefTimer: false
+    })
+
+    assert.strictEqual(timers[0].unrefCalled, undefined)
+    controller.stop()
+  })
+
+  it('starts the bot with PowerShell Start-Process on Windows', async () => {
+    const { startBotProcess } = require('../bot')
+    const calls = []
+    const result = await startBotProcess({
+      execFile: (command, args, options, callback) => {
+        calls.push({ command, args, cwd: options.cwd })
+        callback(null, '9876\r\n', '')
+        return { stdin: { end: () => {} } }
+      },
+      fs: {
+        mkdirSync: () => {},
+        openSync: () => 1
+      },
+      platform: 'win32',
+      cwd: 'C:\\bot',
+      logPath: 'C:\\bot\\logs\\bot-runtime.log'
+    })
+
+    assert.strictEqual(result.pid, 9876)
+    assert.strictEqual(calls[0].command, 'powershell.exe')
+    assert(calls[0].args.join('\n').includes('Start-Process'))
+    assert(calls[0].args.join('\n').includes('npm.cmd'))
   })
 
   it('rotates debug logs before appending when the active log is too large', () => {

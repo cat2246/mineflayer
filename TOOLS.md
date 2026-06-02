@@ -108,3 +108,18 @@ Example:
 ```json
 {"tool":"record_missing_function","args":{"capability":"craft wooden doors","reason":"Player asked the bot to craft a door from wood.","suggestedTool":"craft_item"}}
 ```
+
+### get_current_coordinates
+
+Use when a player asks where the bot is, what its current coordinates are, or asks for its position.
+
+Behavior:
+
+- Reads the bot current in-game position.
+- Sends the position back to the model so it can answer the player.
+
+Example:
+
+```json
+{"tool":"get_current_coordinates","args":{}}
+```

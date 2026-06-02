@@ -12,7 +12,9 @@
     "fix": "standard --fix && standard-markdown --fix",
     "prepublishOnly": "cp docs/README.md README.md",
     "start": "node bot.js",
-    "dev": "node --watch bot.js"
+    "dev": "node --watch bot.js",
+    "maintenance": "node scripts/maintenanceAutomation.js",
+    "maintenance:once": "node scripts/maintenanceAutomation.js --once"
   },
   "repository": {
     "type": "git",

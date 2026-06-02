@@ -29,6 +29,10 @@ function enablePhysics (bot, debugLog, spawnCount) {
   }
 }
 
+function isSafeMinecraftUsername (username) {
+  return /^[A-Za-z0-9_]{3,16}$/.test(String(username || ''))
+}
+
 async function enablePhysicsAfterDelay (bot, wait, debugLog, spawnCount) {
   await wait(PHYSICS_ENABLE_DELAY_MS)
   enablePhysics(bot, debugLog, spawnCount)
@@ -196,6 +200,10 @@ function attachEventLogging (bot, options = {}) {
   bot.on('playerJoined', (player) => {
     const username = player?.username
     if (!username || username === bot.username || typeof bot.chat !== 'function') return
+    if (!isSafeMinecraftUsername(username)) {
+      debugLog('playerJoined.greetingSkipped', { username, reason: 'unsafe-username' })
+      return
+    }
 
     if (!playerGreetingEnabled) {
       knownPlayers.add(username)
@@ -244,5 +252,6 @@ function attachEventLogging (bot, options = {}) {
 
 module.exports = {
   attachEventLogging,
-  isIgnorableParticleDecodeError
+  isIgnorableParticleDecodeError,
+  isSafeMinecraftUsername
 }
