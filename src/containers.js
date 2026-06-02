@@ -415,6 +415,7 @@ function findNearbyContainerBlocks (bot, options = {}) {
 }
 
 async function approachContainerBlock (bot, block, options = {}) {
+  const debugLog = options.debugLog || (() => {})
   if (options.approachContainers === false) return true
   if (!block?.position) return false
 
@@ -423,8 +424,19 @@ async function approachContainerBlock (bot, block, options = {}) {
   if (isAtContainerInteractionTarget(bot, target, options)) return true
   if (typeof bot.pathfinder?.goto !== 'function') return true
 
-  await bot.pathfinder.goto(new GoalNear(target.x, target.y, target.z, options.containerApproachRange ?? 1))
-  return true
+  try {
+    if (typeof bot.pathfinder?.setGoal === 'function') bot.pathfinder.setGoal(null)
+    await bot.pathfinder.goto(new GoalNear(target.x, target.y, target.z, options.containerApproachRange ?? 1))
+    return true
+  } catch (err) {
+    debugLog('container.pathError', {
+      block: block.name,
+      position: block.position,
+      target,
+      message: err.message
+    })
+    return false
+  }
 }
 
 function containerFacing (block) {

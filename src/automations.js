@@ -26,6 +26,19 @@ function taskHasMoreWork (result) {
   return Boolean(result)
 }
 
+function normalizeTimeOfDay (timeOfDay) {
+  if (typeof timeOfDay !== 'number' || !Number.isFinite(timeOfDay)) return null
+  return ((timeOfDay % 24000) + 24000) % 24000
+}
+
+function automationPeriod (bot) {
+  const normalizedTimeOfDay = normalizeTimeOfDay(bot.time?.timeOfDay)
+  if (normalizedTimeOfDay !== null) return normalizedTimeOfDay >= 13000 ? 'night' : 'day'
+  if (bot.time?.isDay === true) return 'day'
+  if (bot.time?.isDay === false) return 'night'
+  return null
+}
+
 function startLoopAutomation (bot, options = {}) {
   const wait = options.sleep || sleep
   const debugLog = options.debugLog || (() => {})
@@ -52,6 +65,7 @@ function startLoopAutomation (bot, options = {}) {
         const result = await options.runTask(bot, activeOptions)
         if (!taskHasMoreWork(result)) {
           output(`${options.name} automation task completed.`)
+          if (!shouldStop()) options.onComplete?.()
           break
         }
       } catch (err) {
@@ -102,34 +116,70 @@ function createAutomationManager (bot, options = {}) {
   const miningAutomation = options.startMiningAutomation || startMiningAutomation
   let activeAutomation = null
   let pausedNightSafetyAutomation = null
+  let waitingNextDayAutomation = null
 
   const automations = options.automations || [
     {
       name: 'Wood cutting',
-      start: () => woodCuttingAutomation(bot, { output, debugLog })
+      resumeAfterNightSafety: true,
+      start: startOptions => woodCuttingAutomation(bot, { output, debugLog, ...startOptions })
     },
     {
       name: 'Farming',
-      start: () => farmingAutomation(bot, { output, debugLog })
+      resumeAfterNightSafety: true,
+      start: startOptions => farmingAutomation(bot, { output, debugLog, ...startOptions })
     },
     {
       name: 'Wild roaming',
-      start: () => wildRoamingAutomation(bot, { output, debugLog })
+      resumeAfterNightSafety: true,
+      start: startOptions => wildRoamingAutomation(bot, { output, debugLog, ...startOptions })
     },
     {
       name: 'Pyro Farming',
       resumeAfterNightSafety: true,
-      start: () => pyroFarmingAutomation(bot, { output, debugLog })
+      start: startOptions => pyroFarmingAutomation(bot, { output, debugLog, ...startOptions })
     },
     {
       name: 'Mining',
       resumeAfterNightSafety: true,
-      start: () => miningAutomation(bot, { output, debugLog })
+      start: startOptions => miningAutomation(bot, { output, debugLog, ...startOptions })
     }
   ]
+  let lastPeriod = automationPeriod(bot)
+  let nightSafetyEnabled = false
 
   function list () {
     return automations.map(({ name }) => ({ name }))
+  }
+
+  function automationName (automation) {
+    return automation?.name
+  }
+
+  function stopAutomationInstance (automation) {
+    if (automation?.instance?.stop) automation.instance.stop()
+  }
+
+  function markAutomationComplete (automation) {
+    if (activeAutomation !== automation || bot._ended) return
+    activeAutomation = null
+    pausedNightSafetyAutomation = null
+    waitingNextDayAutomation = automation.definition
+    debugLog('automation.waitForNextDay', { name: automationName(automation.definition) })
+  }
+
+  async function startAutomation (automation, debugEvent) {
+    const active = {
+      definition: automation,
+      instance: null
+    }
+    activeAutomation = active
+    const instance = await automation.start({
+      onComplete: () => markAutomationComplete(active)
+    })
+    if (activeAutomation === active) active.instance = instance
+    debugLog(debugEvent, { name: automationName(automation) })
+    return active
   }
 
   async function startByIndex (index) {
@@ -139,23 +189,22 @@ function createAutomationManager (bot, options = {}) {
       return false
     }
 
-    if (activeAutomation?.instance?.stop) activeAutomation.instance.stop()
+    stopAutomationInstance(activeAutomation)
     pausedNightSafetyAutomation = null
-    activeAutomation = {
-      ...automation,
-      instance: await automation.start()
-    }
-    debugLog('automation.start', { name: automation.name })
+    waitingNextDayAutomation = null
+    await startAutomation(automation, 'automation.start')
     return true
   }
 
   function stopActive () {
-    const hadActiveAutomation = Boolean(activeAutomation?.instance?.stop)
+    const hadActiveAutomation = Boolean(activeAutomation)
     const hadPausedAutomation = Boolean(pausedNightSafetyAutomation)
-    if (!hadActiveAutomation && !hadPausedAutomation) return false
-    if (activeAutomation?.instance?.stop) activeAutomation.instance.stop()
+    const hadWaitingAutomation = Boolean(waitingNextDayAutomation)
+    if (!hadActiveAutomation && !hadPausedAutomation && !hadWaitingAutomation) return false
+    stopAutomationInstance(activeAutomation)
     activeAutomation = null
     pausedNightSafetyAutomation = null
+    waitingNextDayAutomation = null
     debugLog('automation.stop')
     return true
   }
@@ -164,32 +213,71 @@ function createAutomationManager (bot, options = {}) {
     if (!activeAutomation) return false
 
     const automation = activeAutomation
-    if (automation.instance?.stop) automation.instance.stop()
+    stopAutomationInstance(automation)
     activeAutomation = null
 
-    if (automation.resumeAfterNightSafety) {
-      pausedNightSafetyAutomation = automation
-      debugLog('automation.pauseForNightSafety', { name: automation.name })
+    if (automation.definition.resumeAfterNightSafety !== false) {
+      pausedNightSafetyAutomation = automation.definition
+      waitingNextDayAutomation = null
+      debugLog('automation.pauseForNightSafety', { name: automationName(automation.definition) })
     } else {
       pausedNightSafetyAutomation = null
-      debugLog('automation.stop', { name: automation.name })
+      waitingNextDayAutomation = null
+      debugLog('automation.stop', { name: automationName(automation.definition) })
     }
 
     return true
   }
 
   async function resumePausedAfterNightSafety () {
-    if (activeAutomation || !pausedNightSafetyAutomation) return false
+    if (activeAutomation) return false
 
-    const automation = pausedNightSafetyAutomation
+    const automation = pausedNightSafetyAutomation || waitingNextDayAutomation
+    if (!automation) return false
+    const debugEvent = pausedNightSafetyAutomation ? 'automation.resumeAfterNightSafety' : 'automation.restartForDay'
     pausedNightSafetyAutomation = null
-    activeAutomation = {
-      ...automation,
-      instance: await automation.start()
-    }
-    debugLog('automation.resumeAfterNightSafety', { name: automation.name })
+    waitingNextDayAutomation = null
+    await startAutomation(automation, debugEvent)
     return true
   }
+
+  async function restartForDay () {
+    if (bot._ended) return false
+
+    const automation = activeAutomation?.definition || pausedNightSafetyAutomation || waitingNextDayAutomation
+    if (!automation) return false
+
+    stopAutomationInstance(activeAutomation)
+    activeAutomation = null
+    pausedNightSafetyAutomation = null
+    waitingNextDayAutomation = null
+    await startAutomation(automation, 'automation.restartForDay')
+    return true
+  }
+
+  async function checkDayTransition () {
+    const period = automationPeriod(bot)
+    if (!period) return false
+    const previousPeriod = lastPeriod
+    lastPeriod = period
+    if (previousPeriod !== 'night' || period !== 'day' || nightSafetyEnabled) return false
+    return restartForDay()
+  }
+
+  function setNightSafetyEnabled (enabled) {
+    nightSafetyEnabled = Boolean(enabled)
+    lastPeriod = automationPeriod(bot) || lastPeriod
+  }
+
+  bot.on?.('time', () => {
+    checkDayTransition()
+  })
+  bot.on?.('spawn', () => {
+    checkDayTransition()
+  })
+  bot.on?.('physicsEnabled', () => {
+    checkDayTransition()
+  })
 
   bot.once?.('end', stopActive)
   bot.once?.('kicked', stopActive)
@@ -197,7 +285,9 @@ function createAutomationManager (bot, options = {}) {
   return {
     list,
     pauseActiveForNightSafety,
+    restartForDay,
     resumePausedAfterNightSafety,
+    setNightSafetyEnabled,
     startByIndex,
     stopActive
   }

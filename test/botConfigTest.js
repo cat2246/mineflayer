@@ -1676,7 +1676,7 @@ describe('holocraft bot config', function () {
     await Promise.resolve()
 
     assert.strictEqual(runCount, 1)
-    assert.strictEqual(targetWoodCount, 32)
+    assert.strictEqual(targetWoodCount, 64)
     assert(output.some(message => message.includes('Started wood cutting automation.')))
     assert(output.some(message => message.includes('Wood cutting automation task completed.')))
   })
@@ -1804,6 +1804,87 @@ describe('holocraft bot config', function () {
       ['debug', 'automation.pauseForNightSafety', 'Pyro Farming'],
       ['start', 2],
       ['debug', 'automation.resumeAfterNightSafety', 'Pyro Farming']
+    ])
+  })
+
+  it('restarts a completed automation on the next Minecraft day', async () => {
+    const { createAutomationManager } = require('../bot')
+    const events = []
+    const bot = new EventEmitter()
+    bot.time = { isDay: true, timeOfDay: 1000 }
+    let completeCurrentAutomation = null
+    let starts = 0
+    const automationManager = createAutomationManager(bot, {
+      output: () => {},
+      debugLog: (event, data) => events.push(['debug', event, data?.name]),
+      startFarmingAutomation: (taskBot, taskOptions) => {
+        starts++
+        const startNumber = starts
+        events.push(['start', startNumber])
+        completeCurrentAutomation = taskOptions.onComplete
+        return {
+          stop: () => events.push(['stop', startNumber])
+        }
+      },
+      startWoodCuttingAutomation: () => ({ stop: () => {} }),
+      startWildRoamingAutomation: () => ({ stop: () => {} }),
+      startPyroFarmingAutomation: () => ({ stop: () => {} }),
+      startMiningAutomation: () => ({ stop: () => {} })
+    })
+
+    await automationManager.startByIndex(1)
+    completeCurrentAutomation()
+    bot.time = { isDay: false, timeOfDay: 14000 }
+    bot.emit('time')
+    bot.time = { isDay: true, timeOfDay: 1000 }
+    bot.emit('time')
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [
+      ['start', 1],
+      ['debug', 'automation.start', 'Farming'],
+      ['debug', 'automation.waitForNextDay', 'Farming'],
+      ['start', 2],
+      ['debug', 'automation.restartForDay', 'Farming']
+    ])
+  })
+
+  it('resets an unfinished active automation on the next Minecraft day', async () => {
+    const { createAutomationManager } = require('../bot')
+    const events = []
+    const bot = new EventEmitter()
+    bot.time = { isDay: true, timeOfDay: 1000 }
+    let starts = 0
+    const automationManager = createAutomationManager(bot, {
+      output: () => {},
+      debugLog: (event, data) => events.push(['debug', event, data?.name]),
+      startWoodCuttingAutomation: () => {
+        starts++
+        const startNumber = starts
+        events.push(['start', startNumber])
+        return {
+          stop: () => events.push(['stop', startNumber])
+        }
+      },
+      startFarmingAutomation: () => ({ stop: () => {} }),
+      startWildRoamingAutomation: () => ({ stop: () => {} }),
+      startPyroFarmingAutomation: () => ({ stop: () => {} }),
+      startMiningAutomation: () => ({ stop: () => {} })
+    })
+
+    await automationManager.startByIndex(0)
+    bot.time = { isDay: false, timeOfDay: 14000 }
+    bot.emit('time')
+    bot.time = { isDay: true, timeOfDay: 1000 }
+    bot.emit('time')
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [
+      ['start', 1],
+      ['debug', 'automation.start', 'Wood cutting'],
+      ['stop', 1],
+      ['start', 2],
+      ['debug', 'automation.restartForDay', 'Wood cutting']
     ])
   })
 
@@ -2687,6 +2768,50 @@ describe('holocraft bot config', function () {
     ])
   })
 
+  it('randomizes wood cutting reach between 3.5 and 4.5 blocks', async () => {
+    const { cutTreeLog } = require('../bot')
+    const highRollEvents = []
+    const lowRollEvents = []
+    const highReachLog = block('oak_log', 0, 70, 0)
+
+    const highRollBot = blockBot([
+      highReachLog,
+      block('oak_leaves', 1, 72, 0)
+    ], highRollEvents)
+    highRollBot.pathfinder = {
+      goto: async goal => highRollEvents.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+    }
+
+    const lowRollBot = blockBot([
+      highReachLog,
+      block('oak_leaves', 1, 72, 0)
+    ], lowRollEvents)
+    lowRollBot.pathfinder = {
+      goto: async goal => lowRollEvents.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+    }
+
+    const highRollCut = await cutTreeLog(highRollBot, highReachLog, {
+      debugLog: () => {},
+      random: () => 1,
+      sleep: async () => {}
+    })
+    const lowRollCut = await cutTreeLog(lowRollBot, highReachLog, {
+      debugLog: () => {},
+      random: () => 0,
+      sleep: async () => {}
+    })
+
+    assert.strictEqual(highRollCut, true)
+    assert.strictEqual(lowRollCut, false)
+    assert.deepStrictEqual(highRollEvents, [
+      ['goto', 'GoalGetToBlock', 0, 70, 0],
+      ['dig', 'oak_log']
+    ])
+    assert.deepStrictEqual(lowRollEvents, [
+      ['goto', 'GoalNearXZ', 0, undefined, 0]
+    ])
+  })
+
   it('does not dig a tree log outside normal player reach', async () => {
     const { cutTreeLog } = require('../bot')
     const events = []
@@ -2734,6 +2859,48 @@ describe('holocraft bot config', function () {
     })
 
     assert.deepStrictEqual(events, [
+      ['dig', 'oak_log', true, 'raycast']
+    ])
+  })
+
+  it('opens a leaf-blocked sightline before digging a tree log', async () => {
+    const { cutTreeLog } = require('../bot')
+    const events = []
+    const treeLog = block('oak_log', 0, 64, 0)
+    const leafBlocker = block('oak_leaves', 0, 65, 0)
+    const blocks = [
+      treeLog,
+      leafBlocker
+    ]
+    const bot = blockBot(blocks, events)
+    let requireVec3BlockAt = false
+    bot.blockAt = position => {
+      if (requireVec3BlockAt && typeof position.floored !== 'function') {
+        throw new Error('pos.floored is not a function')
+      }
+      return blocks.find(candidate =>
+        candidate.position.x === position.x &&
+        candidate.position.y === position.y &&
+        candidate.position.z === position.z
+      ) || null
+    }
+    bot.pathfinder = {
+      goto: async () => {
+        requireVec3BlockAt = true
+      }
+    }
+    bot.dig = async (target, forceLook, digFace) => {
+      events.push(['dig', target.name, forceLook, digFace])
+    }
+
+    const cut = await cutTreeLog(bot, treeLog, {
+      debugLog: () => {},
+      sleep: async () => {}
+    })
+
+    assert.strictEqual(cut, true)
+    assert.deepStrictEqual(events, [
+      ['dig', 'oak_leaves', true, 'raycast'],
       ['dig', 'oak_log', true, 'raycast']
     ])
   })
@@ -3718,6 +3885,52 @@ describe('holocraft bot config', function () {
     ])
   })
 
+  it('continues night safety sleep when a storage path is stopped', async () => {
+    const { runNightSafetyCycle } = require('../bot')
+    const events = []
+    const door = block('oak_door', 1, 64, 0)
+    const chestBlock = block('trapped_chest', 3, 64, 0)
+    const bedBlock = block('red_bed', 4, 64, 0)
+    const dirt = { name: 'dirt', type: 3, count: 12 }
+    const bot = blockBot([door, chestBlock, bedBlock], events)
+    bot.inventory.items = () => [dirt]
+    bot.chat = command => events.push(['chat', command])
+    let gotoCount = 0
+    bot.pathfinder = {
+      goto: async goal => {
+        gotoCount++
+        events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+        if (gotoCount === 2) {
+          throw new Error('Path was stopped before it could be completed! Thus, the desired goal was not reached.')
+        }
+      },
+      setGoal: goal => events.push(['setGoal', goal])
+    }
+    bot.activateBlock = async target => events.push(['activateBlock', target.name])
+    bot.setControlState = (control, state) => events.push(['control', control, state])
+    bot.openContainer = async target => {
+      events.push(['openContainer', target.name])
+      return {
+        deposit: async (type, metadata, count) => events.push(['deposit', type, count]),
+        close: () => events.push(['close'])
+      }
+    }
+    bot.sleep = async target => events.push(['sleep', target.name])
+
+    const completed = await runNightSafetyCycle(bot, {
+      containerInteractionDelayMs: 0,
+      homeWaitMs: 0,
+      placesPath: tempPlacesPath(),
+      sleep: async () => {},
+      debugLog: (event, data) => events.push(['debug', event, data?.message || data?.block])
+    })
+
+    assert.strictEqual(completed, true)
+    assert(events.some(event => event[0] === 'debug' && event[1] === 'container.pathError'))
+    assert(events.some(event => event[0] === 'sleep' && event[1] === 'red_bed'))
+    assert(!events.some(event => event[0] === 'openContainer'))
+  })
+
   it('harvests mature crops near home and replants them', async () => {
     const { runFarmingTask } = require('../bot')
     const events = []
@@ -4274,7 +4487,7 @@ describe('holocraft bot config', function () {
     ])
   })
 
-  it('uses 32 wood as the default wood cutting quota', async () => {
+  it('uses 64 wood as the default wood cutting quota', async () => {
     const { runWoodCuttingQuotaTask } = require('../bot')
     const events = []
     const bot = blockBot([], events)
@@ -4289,14 +4502,14 @@ describe('holocraft bot config', function () {
       countWoodItems: () => woodCount,
       runWoodCuttingCycle: async () => {
         events.push(['woodCycle', woodCount])
-        woodCount += 32
+        woodCount += 64
         return true
       },
       depositWoodAtHome: async () => events.push(['depositWood'])
     })
 
     assert.strictEqual(completed, true)
-    assert.strictEqual(targetWoodCount, 32)
+    assert.strictEqual(targetWoodCount, 64)
     assert.deepStrictEqual(events, [
       ['woodCycle', 0],
       ['depositWood']
@@ -4311,7 +4524,7 @@ describe('holocraft bot config', function () {
     const completed = await runWoodCuttingQuotaTask(bot, {
       debugLog: () => {},
       sleep: async () => {},
-      countWoodItems: () => 32,
+      countWoodItems: () => 64,
       runWoodCuttingCycle: async () => events.push(['woodCycle']),
       depositWoodAtHome: async () => events.push(['depositWood'])
     })
@@ -4832,7 +5045,7 @@ describe('holocraft bot config', function () {
     assert.strictEqual(wildLast.find(task => task.name === 'Wild Roaming').repeatUntilNight, true)
   })
 
-  it('uses a 32 wood target for the default daytime wood cutting task', async () => {
+  it('uses a 64 wood target for the default daytime wood cutting task', async () => {
     const { createDefaultDaytimeTasks } = require('../bot')
     const events = []
     const bot = blockBot([], events)
@@ -4849,7 +5062,7 @@ describe('holocraft bot config', function () {
       countWoodItems: () => woodCount,
       runWoodCuttingCycle: async () => {
         cycles++
-        woodCount += 32
+        woodCount += 64
         return true
       },
       depositWoodAtHome: async () => events.push(['depositWood']),
@@ -4858,7 +5071,7 @@ describe('holocraft bot config', function () {
 
     assert.strictEqual(completed, true)
     assert.strictEqual(cycles, 1)
-    assert.strictEqual(targetWoodCount, 32)
+    assert.strictEqual(targetWoodCount, 64)
   })
 
   it('keeps wild roaming until night starts', async () => {
@@ -5574,6 +5787,59 @@ describe('holocraft bot config', function () {
       ['gear'],
       ['exit'],
       ['resumeMining']
+    ])
+  })
+
+  it('restarts a completed automation after night safety morning regear', async () => {
+    const { attachNightSafety, createAutomationManager } = require('../bot')
+    const bot = new EventEmitter()
+    const events = []
+    bot.physicsEnabled = true
+    bot.time = { isDay: true, timeOfDay: 1000 }
+    bot.entity = { position: combatPosition(0, 68, 0) }
+    let completeCurrentAutomation = null
+    let starts = 0
+    const automationManager = createAutomationManager(bot, {
+      output: () => {},
+      debugLog: (event, data) => events.push(['debug', event, data?.name]),
+      startFarmingAutomation: (taskBot, taskOptions) => {
+        starts++
+        events.push(['start', starts])
+        completeCurrentAutomation = taskOptions.onComplete
+        return {
+          stop: () => events.push(['stop', starts])
+        }
+      },
+      startWoodCuttingAutomation: () => ({ stop: () => {} }),
+      startWildRoamingAutomation: () => ({ stop: () => {} }),
+      startPyroFarmingAutomation: () => ({ stop: () => {} }),
+      startMiningAutomation: () => ({ stop: () => {} })
+    })
+
+    await automationManager.startByIndex(1)
+    completeCurrentAutomation()
+    attachNightSafety(bot, {
+      checkIntervalMs: 0,
+      enabled: true,
+      debugLog: (event, data) => events.push(['nightDebug', event, data?.name]),
+      automationManager,
+      runDayGearCycle: async () => events.push(['gear']),
+      leaveHomeForDaytime: async () => events.push(['exit'])
+    })
+
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [
+      ['start', 1],
+      ['debug', 'automation.start', 'Farming'],
+      ['debug', 'automation.waitForNextDay', 'Farming'],
+      ['nightDebug', 'nightSafety.day.start', undefined],
+      ['gear'],
+      ['exit'],
+      ['start', 2],
+      ['debug', 'automation.restartForDay', 'Farming'],
+      ['nightDebug', 'nightSafety.day.done', undefined]
     ])
   })
 

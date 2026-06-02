@@ -673,6 +673,8 @@ function attachNightSafety (bot, options = {}) {
   let nightHomeAnchor = null
   let nextNightRetryAt = 0
 
+  options.automationManager?.setNightSafetyEnabled?.(enabled)
+
   async function checkTime () {
     if (!enabled) return
     if (running || bot._ended) return
@@ -747,6 +749,7 @@ function attachNightSafety (bot, options = {}) {
     enabled = Boolean(value)
     lastPeriod = null
     nextNightRetryAt = 0
+    options.automationManager?.setNightSafetyEnabled?.(enabled)
     debugLog('nightSafety.toggle', { enabled })
     if (enabled) Promise.resolve().then(checkTime)
     return {

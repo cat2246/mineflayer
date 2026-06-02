@@ -17,7 +17,8 @@ const {
   WOODCUTTING_PATH_TIMEOUT_MS,
   WOODCUTTING_POST_DIG_DELAY_MS,
   WOODCUTTING_ROAM_RADIUS,
-  WOODCUTTING_SURVIVAL_REACH_DISTANCE,
+  WOODCUTTING_SURVIVAL_REACH_DISTANCE_MAX,
+  WOODCUTTING_SURVIVAL_REACH_DISTANCE_MIN,
   WOODCUTTING_TARGET_WOOD_COUNT,
   WOODCUTTING_TREE_SEARCH_RADIUS
 } = require('./config')
@@ -372,6 +373,10 @@ function blockCenterPosition (block) {
   }
 }
 
+function blockPositionFromPoint (point) {
+  return vec3(Math.floor(point.x), Math.floor(point.y), Math.floor(point.z))
+}
+
 function offsetPosition (position, x, y, z) {
   if (!position) return null
   if (typeof position.offset === 'function') return position.offset(x, y, z)
@@ -397,23 +402,26 @@ function squaredDistanceToBlockBounds (position, block) {
     Math.pow(position.z - closestZ, 2)
 }
 
-function woodcuttingReachDistance (bot) {
-  return bot.game?.gameMode === 'creative'
-    ? WOODCUTTING_CREATIVE_REACH_DISTANCE
-    : WOODCUTTING_SURVIVAL_REACH_DISTANCE
+function woodcuttingReachDistance (bot, options = {}) {
+  if (bot.game?.gameMode === 'creative') return WOODCUTTING_CREATIVE_REACH_DISTANCE
+  if (typeof options.woodcuttingReachDistance === 'number') return options.woodcuttingReachDistance
+
+  const random = options.random || Math.random
+  return WOODCUTTING_SURVIVAL_REACH_DISTANCE_MIN +
+    (random() * (WOODCUTTING_SURVIVAL_REACH_DISTANCE_MAX - WOODCUTTING_SURVIVAL_REACH_DISTANCE_MIN))
 }
 
-function isBlockWithinPlayerReach (bot, block) {
+function isBlockWithinPlayerReach (bot, block, options = {}) {
   const eyePosition = offsetPosition(bot.entity?.position, 0, bot.entity?.eyeHeight ?? 1.65, 0)
   if (!eyePosition || !block?.position) return false
 
-  const reachDistance = woodcuttingReachDistance(bot)
+  const reachDistance = woodcuttingReachDistance(bot, options)
   return squaredDistanceToBlockBounds(eyePosition, block) <= Math.pow(reachDistance, 2)
 }
 
-function isBlockReachableForDig (bot, block) {
+function isBlockReachableForDig (bot, block, options = {}) {
   if (!block) return false
-  if (!isBlockWithinPlayerReach(bot, block)) return false
+  if (!isBlockWithinPlayerReach(bot, block, options)) return false
 
   if (typeof bot.canDigBlock === 'function') {
     try {
@@ -426,15 +434,15 @@ function isBlockReachableForDig (bot, block) {
   return true
 }
 
-function shouldApproachLogColumn (bot, block) {
+function shouldApproachLogColumn (bot, block, options = {}) {
   const botY = bot.entity?.position?.y
   if (typeof botY !== 'number') return false
 
-  return block.position.y - Math.floor(botY) > 2 && !isBlockReachableForDig(bot, block)
+  return block.position.y - Math.floor(botY) > 2 && !isBlockReachableForDig(bot, block, options)
 }
 
-function createLogApproachGoal (bot, block) {
-  if (shouldApproachLogColumn(bot, block)) {
+function createLogApproachGoal (bot, block, options = {}) {
+  if (shouldApproachLogColumn(bot, block, options)) {
     return new GoalNearXZ(block.position.x, block.position.z, 2)
   }
 
@@ -444,13 +452,13 @@ function createLogApproachGoal (bot, block) {
 async function ensureLogReachable (bot, block, options = {}) {
   const debugLog = options.debugLog || (() => {})
 
-  if (isBlockReachableForDig(bot, block)) return true
+  if (isBlockReachableForDig(bot, block, options)) return true
 
   debugLog('automation.woodcutting.unreachableLog', {
     block: block.name,
     position: positionData(block.position)
   })
-  return isBlockReachableForDig(bot, block)
+  return isBlockReachableForDig(bot, block, options)
 }
 
 async function prepareForManualDig (bot, block, options = {}) {
@@ -571,8 +579,44 @@ async function collectNearbyDrops (bot, originPosition, options = {}) {
   return collected
 }
 
+function findRaycastLeafBlocker (bot, block, attempted = new Set(), options = {}) {
+  const eyePosition = offsetPosition(bot.entity?.position, 0, bot.entity?.eyeHeight ?? 1.65, 0)
+  if (!eyePosition || !hasUsablePosition(block) || typeof bot.blockAt !== 'function') return null
+
+  const target = blockCenterPosition(block)
+  const dx = target.x - eyePosition.x
+  const dy = target.y - eyePosition.y
+  const dz = target.z - eyePosition.z
+  const distance = Math.sqrt(Math.pow(dx, 2) + Math.pow(dy, 2) + Math.pow(dz, 2))
+  const steps = Math.max(1, Math.ceil(distance * 4))
+  const targetKey = positionKey(block.position)
+  const seenPositions = new Set()
+
+  for (let step = 1; step < steps; step++) {
+    const point = {
+      x: eyePosition.x + (dx * step / steps),
+      y: eyePosition.y + (dy * step / steps),
+      z: eyePosition.z + (dz * step / steps)
+    }
+    const position = blockPositionFromPoint(point)
+    const key = positionKey(position)
+    if (key === targetKey || attempted.has(key) || seenPositions.has(key)) continue
+    seenPositions.add(key)
+
+    const nearby = bot.blockAt(position)
+    if (!nearby || !isLeafName(nearby.name)) continue
+    if (!isBlockReachableForDig(bot, nearby, options)) continue
+    return nearby
+  }
+
+  return null
+}
+
 function findReachableLeafBlocker (bot, block, attempted = new Set(), options = {}) {
   if (!hasUsablePosition(block)) return null
+
+  const raycastBlocker = findRaycastLeafBlocker(bot, block, attempted, options)
+  if (raycastBlocker) return raycastBlocker
 
   const radius = options.leafBlockerSearchRadius ?? WOODCUTTING_LEAF_BLOCKER_SEARCH_RADIUS
   const candidates = []
@@ -585,7 +629,7 @@ function findReachableLeafBlocker (bot, block, attempted = new Set(), options = 
         const nearby = bot.blockAt(position)
         if (!nearby || !isLeafName(nearby.name)) continue
         if (attempted.has(positionKey(nearby.position))) continue
-        if (!isBlockReachableForDig(bot, nearby)) continue
+        if (!isBlockReachableForDig(bot, nearby, options)) continue
         candidates.push(nearby)
       }
     }
@@ -595,13 +639,49 @@ function findReachableLeafBlocker (bot, block, attempted = new Set(), options = 
     .sort((a, b) => distanceBetween(bot.entity.position, a.position) - distanceBetween(bot.entity.position, b.position))[0] || null
 }
 
+async function clearLeafBlocker (bot, treeLog, leafBlocker, options = {}) {
+  const debugLog = options.debugLog || (() => {})
+
+  debugLog('automation.woodcutting.clearLeafBlocker', {
+    block: leafBlocker.name,
+    position: positionData(leafBlocker.position),
+    target: positionData(treeLog.position)
+  })
+
+  try {
+    const prepared = await prepareForManualDig(bot, leafBlocker, options)
+    if (!prepared) return false
+    await digBlockWithSafeEnchantments(bot, leafBlocker, debugLog)
+    await waitAfterDig(leafBlocker, options)
+    return true
+  } catch (leafErr) {
+    debugLog('automation.woodcutting.clearLeafBlockerFailed', {
+      block: leafBlocker.name,
+      position: positionData(leafBlocker.position),
+      message: leafErr.message
+    })
+    return false
+  }
+}
+
 async function digTreeLogWithLeafFallback (bot, treeLog, options = {}) {
   const debugLog = options.debugLog || (() => {})
   const maxLeafBlockers = options.leafBlockerClearCount ?? WOODCUTTING_LEAF_BLOCKER_CLEAR_COUNT
   const attemptedLeafPositions = new Set()
+  let blockersCleared = 0
 
-  for (let blockersCleared = 0; blockersCleared <= maxLeafBlockers; blockersCleared++) {
+  while (blockersCleared <= maxLeafBlockers) {
     if (isWoodcuttingStopped(bot, options)) return false
+
+    if (blockersCleared < maxLeafBlockers) {
+      const raycastBlocker = findRaycastLeafBlocker(bot, treeLog, attemptedLeafPositions, options)
+      if (raycastBlocker) {
+        attemptedLeafPositions.add(positionKey(raycastBlocker.position))
+        if (await clearLeafBlocker(bot, treeLog, raycastBlocker, options)) blockersCleared++
+        continue
+      }
+    }
+
     try {
       await digBlockWithSafeEnchantments(bot, treeLog, debugLog)
       return true
@@ -610,7 +690,7 @@ async function digTreeLogWithLeafFallback (bot, treeLog, options = {}) {
       if (!isBlockNotInViewError(err)) throw err
 
       const leafBlocker = findReachableLeafBlocker(bot, treeLog, attemptedLeafPositions, options)
-      if (!leafBlocker || blockersCleared === maxLeafBlockers) {
+      if (!leafBlocker || blockersCleared >= maxLeafBlockers) {
         debugLog('automation.woodcutting.blockedLog', {
           block: treeLog.name,
           position: positionData(treeLog.position),
@@ -621,24 +701,7 @@ async function digTreeLogWithLeafFallback (bot, treeLog, options = {}) {
       }
 
       attemptedLeafPositions.add(positionKey(leafBlocker.position))
-      debugLog('automation.woodcutting.clearLeafBlocker', {
-        block: leafBlocker.name,
-        position: positionData(leafBlocker.position),
-        target: positionData(treeLog.position)
-      })
-
-      try {
-        const prepared = await prepareForManualDig(bot, leafBlocker, options)
-        if (!prepared) return false
-        await digBlockWithSafeEnchantments(bot, leafBlocker, debugLog)
-        await waitAfterDig(leafBlocker, options)
-      } catch (leafErr) {
-        debugLog('automation.woodcutting.clearLeafBlockerFailed', {
-          block: leafBlocker.name,
-          position: positionData(leafBlocker.position),
-          message: leafErr.message
-        })
-      }
+      if (await clearLeafBlocker(bot, treeLog, leafBlocker, options)) blockersCleared++
     }
   }
 
@@ -899,9 +962,13 @@ async function cutTreeLog (bot, treeLog, options = {}) {
     throw new Error('Wood cutting requires mineflayer-pathfinder to be loaded.')
   }
 
+  const reachOptions = {
+    ...options,
+    woodcuttingReachDistance: woodcuttingReachDistance(bot, options)
+  }
   const reached = await gotoGoal(
     bot,
-    createLogApproachGoal(bot, treeLog),
+    createLogApproachGoal(bot, treeLog, reachOptions),
     options,
     {
       mode: 'cut',
@@ -914,7 +981,7 @@ async function cutTreeLog (bot, treeLog, options = {}) {
     ignoreTreeLog(bot, treeLog, options, 'path-failed')
     return false
   }
-  const reachable = await ensureLogReachable(bot, treeLog, options)
+  const reachable = await ensureLogReachable(bot, treeLog, reachOptions)
   if (isWoodcuttingStopped(bot, options)) return false
   if (!reachable) {
     ignoreTreeLog(bot, treeLog, options, 'unreachable')
@@ -1107,7 +1174,10 @@ function startWoodCuttingAutomation (bot, options = {}) {
         ...activeOptions,
         targetWoodCount: activeOptions.targetWoodCount ?? WOODCUTTING_TARGET_WOOD_COUNT
       })
-      if (completed && !shouldStop()) output('Wood cutting automation task completed.')
+      if (completed && !shouldStop()) {
+        output('Wood cutting automation task completed.')
+        activeOptions.onComplete?.()
+      }
     } catch (err) {
       output(`Wood cutting error: ${err.message}`)
       debugLog('automation.woodcutting.error', { message: err.message, stack: err.stack })
