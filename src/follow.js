@@ -161,6 +161,18 @@ function createFollowController (bot, options = {}) {
     }
   }
 
+  function getStatus () {
+    return {
+      followedPlayerName,
+      pickupEnabled,
+      collectingDrop
+    }
+  }
+
+  function isIdle () {
+    return !followedPlayerName && !collectingDrop
+  }
+
   function notifyIfNeeded () {
     if (!followedPlayerName) return
     const currentTime = now()
@@ -288,7 +300,9 @@ function createFollowController (bot, options = {}) {
 
   return {
     followPlayer,
+    getStatus,
     helpLines,
+    isIdle,
     tick,
     togglePickup,
     unfollow,

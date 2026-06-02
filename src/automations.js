@@ -156,6 +156,20 @@ function createAutomationManager (bot, options = {}) {
     return automation?.name
   }
 
+  function getStatus () {
+    return {
+      active: automationName(activeAutomation?.definition) || null,
+      pausedForNightSafety: automationName(pausedNightSafetyAutomation) || null,
+      waitingNextDay: automationName(waitingNextDayAutomation) || null,
+      nightSafetyEnabled
+    }
+  }
+
+  function isIdle () {
+    const status = getStatus()
+    return !status.active && !status.pausedForNightSafety && !status.waitingNextDay
+  }
+
   function stopAutomationInstance (automation) {
     if (automation?.instance?.stop) automation.instance.stop()
   }
@@ -283,6 +297,8 @@ function createAutomationManager (bot, options = {}) {
   bot.once?.('kicked', stopActive)
 
   return {
+    getStatus,
+    isIdle,
     list,
     pauseActiveForNightSafety,
     restartForDay,

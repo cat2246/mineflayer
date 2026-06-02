@@ -69,12 +69,12 @@ describe('holocraft bot config', function () {
     assert.ok(options.username.length > 0)
   })
 
-  it('uses third-person viewer defaults on port 3007', () => {
+  it('uses first-person viewer defaults on port 3007', () => {
     const { buildViewerOptions } = require('../bot')
 
     assert.deepStrictEqual(buildViewerOptions(), {
       port: 3007,
-      firstPerson: false
+      firstPerson: true
     })
   })
 
@@ -173,7 +173,7 @@ describe('holocraft bot config', function () {
       bot.viewer = 'viewer'
     }, {
       port: 3007,
-      firstPerson: false,
+      firstPerson: true,
       isPortAvailable: async () => true
     })
 
@@ -181,7 +181,7 @@ describe('holocraft bot config', function () {
       viewerBot: bot,
       options: {
         port: 3007,
-        firstPerson: false
+        firstPerson: true
       }
     }])
     assert.strictEqual(viewer, 'viewer')
@@ -380,6 +380,162 @@ describe('holocraft bot config', function () {
     bot.emit('resourcePack', 'https://example.com/pack.zip', 'hash')
 
     assert.strictEqual(accepted, 1)
+  })
+
+  it('greets players who join after the bot is ready', async () => {
+    const { attachEventLogging } = require('../bot')
+    const bot = new EventEmitter()
+    const messages = []
+    const entries = []
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => messages.push(message)
+
+    attachEventLogging(bot, {
+      debugLog: (event, data) => entries.push({ event, data }),
+      loginToServer: async () => false,
+      joinSurvivalWorld: async () => {},
+      now: () => 1000,
+      playerGreetingStartupDelayMs: 0,
+      startViewer: () => {}
+    })
+
+    bot.emit('spawn')
+    await new Promise(resolve => setImmediate(resolve))
+    bot.emit('playerJoined', { username: 'Steve' })
+
+    assert.deepStrictEqual(messages, ['hi Steve'])
+    assert(entries.some(entry =>
+      entry.event === 'playerJoined.greeted' &&
+      entry.data.username === 'Steve' &&
+      entry.data.cooldownMs === 30000
+    ))
+  })
+
+  it('does not greet players who were already present when the bot joined', async () => {
+    const { attachEventLogging } = require('../bot')
+    const bot = new EventEmitter()
+    const messages = []
+    bot.username = 'PokiMoki82719'
+    bot.players = {
+      Steve: { username: 'Steve' },
+      Alex: { username: 'Alex' }
+    }
+    bot.chat = message => messages.push(message)
+
+    attachEventLogging(bot, {
+      loginToServer: async () => false,
+      joinSurvivalWorld: async () => {},
+      now: () => 1000,
+      playerGreetingStartupDelayMs: 0,
+      startViewer: () => {}
+    })
+
+    bot.emit('playerJoined', { username: 'Steve' })
+    bot.emit('spawn')
+    await new Promise(resolve => setImmediate(resolve))
+    bot.emit('playerJoined', { username: 'Steve' })
+    bot.emit('playerJoined', { username: 'Alex' })
+    bot.emit('playerJoined', { username: 'Bob' })
+
+    assert.deepStrictEqual(messages, ['hi Bob'])
+  })
+
+  it('does not greet player join events during startup sync', async () => {
+    const { attachEventLogging } = require('../bot')
+    const bot = new EventEmitter()
+    const messages = []
+    const timers = []
+    const entries = []
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => messages.push(message)
+
+    attachEventLogging(bot, {
+      debugLog: (event, data) => entries.push({ event, data }),
+      loginToServer: async () => false,
+      joinSurvivalWorld: async () => {},
+      now: () => 1000,
+      setTimeout: (callback, delayMs) => {
+        timers.push({ callback, delayMs })
+        return { unref: () => {} }
+      },
+      startViewer: () => {}
+    })
+
+    bot.emit('spawn')
+    await new Promise(resolve => setImmediate(resolve))
+    bot.emit('playerJoined', { username: 'Steve' })
+
+    assert.deepStrictEqual(messages, [])
+    assert.strictEqual(timers.length, 1)
+    assert.strictEqual(timers[0].delayMs, 30000)
+    assert(entries.some(entry =>
+      entry.event === 'playerJoined.greetingSkipped' &&
+      entry.data.username === 'Steve' &&
+      entry.data.reason === 'startup'
+    ))
+
+    timers.shift().callback()
+    bot.emit('playerJoined', { username: 'Alex' })
+
+    assert.deepStrictEqual(messages, ['hi Alex'])
+  })
+
+  it('waits 30 seconds between player join greetings', async () => {
+    const { attachEventLogging } = require('../bot')
+    const bot = new EventEmitter()
+    const messages = []
+    const timers = []
+    let timeMs = 0
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => messages.push(message)
+
+    attachEventLogging(bot, {
+      loginToServer: async () => false,
+      joinSurvivalWorld: async () => {},
+      now: () => timeMs,
+      playerGreetingStartupDelayMs: 0,
+      setTimeout: (callback, delayMs) => {
+        timers.push({ callback, delayMs })
+        return { unref: () => {} }
+      },
+      startViewer: () => {}
+    })
+
+    bot.emit('spawn')
+    await new Promise(resolve => setImmediate(resolve))
+    bot.emit('playerJoined', { username: 'Steve' })
+    timeMs = 1000
+    bot.emit('playerJoined', { username: 'Alex' })
+
+    assert.deepStrictEqual(messages, ['hi Steve'])
+    assert.strictEqual(timers.length, 1)
+    assert.strictEqual(timers[0].delayMs, 29000)
+
+    timeMs = 30000
+    timers.shift().callback()
+
+    assert.deepStrictEqual(messages, ['hi Steve', 'hi Alex'])
+  })
+
+  it('does not greet itself when the bot joins the server', async () => {
+    const { attachEventLogging } = require('../bot')
+    const bot = new EventEmitter()
+    const messages = []
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => messages.push(message)
+
+    attachEventLogging(bot, {
+      loginToServer: async () => false,
+      joinSurvivalWorld: async () => {},
+      playerGreetingStartupDelayMs: 0,
+      startViewer: () => {}
+    })
+
+    bot.emit('spawn')
+    await new Promise(resolve => setImmediate(resolve))
+    bot.emit('playerJoined', { username: 'PokiMoki82719' })
+
+    assert.deepStrictEqual(messages, [])
   })
 
   it('recognizes noisy particle partial-read protocol errors', () => {
@@ -2408,6 +2564,440 @@ describe('holocraft bot config', function () {
     }
   })
 
+  it('loads MEMORY.md into Codex chat requests', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const requests = []
+    const memoryPath = tempMemoryPath()
+    fs.writeFileSync(memoryPath, [
+      '# Minecraft Bot Memory',
+      '',
+      '## Recent Player Interactions',
+      '- 2026-06-02T00:00:00.000Z [public] Steve: likes spruce houses | bot: good taste, finally'
+    ].join('\n'))
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => events.push(['chat', message])
+
+    attachAiChat(bot, {
+      memoryPath,
+      runCodex: async request => {
+        requests.push(request)
+        return 'Spruce enjoyer detected.'
+      }
+    })
+
+    bot.emit('chat', 'Steve', '@PokiMoki82719 remember me?')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.strictEqual(requests.length, 1)
+    assert(requests[0].memory.includes('likes spruce houses'))
+    assert.deepStrictEqual(events, [['chat', '@Steve Spruce enjoyer detected.']])
+  })
+
+  it('loads TOOLS.md into Codex chat requests', async () => {
+    const { attachAiChat } = require('../bot')
+    const requests = []
+    const toolsPath = tempToolsPath()
+    fs.writeFileSync(toolsPath, [
+      '# Minecraft Bot Tools',
+      '',
+      '### meet_player_at_spawn',
+      '',
+      'Runs `/spawn` and finds the player.',
+      '',
+      '### request_tpa',
+      '',
+      'Runs `/tpa <player>`.',
+      '',
+      '### run_server_command',
+      '',
+      'Runs safe commands.'
+    ].join('\n'))
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.chat = () => {}
+
+    attachAiChat(bot, {
+      memoryEnabled: false,
+      toolsPath,
+      runCodex: async request => {
+        requests.push(request)
+        return 'Sure.'
+      }
+    })
+
+    bot.emit('chat', 'Steve', '@PokiMoki82719 what can you do?')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.strictEqual(requests.length, 1)
+    assert(requests[0].tools.includes('meet_player_at_spawn'))
+    assert(requests[0].tools.includes('request_tpa'))
+    assert(requests[0].tools.includes('run_server_command'))
+  })
+
+  it('writes player conversations to MEMORY.md', async () => {
+    const { attachAiChat } = require('../bot')
+    const memoryPath = tempMemoryPath()
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.chat = () => {}
+
+    attachAiChat(bot, {
+      memoryPath,
+      now: () => new Date('2026-06-02T09:30:00.000Z'),
+      runCodex: async () => 'I remember things now. Terrifying, honestly.'
+    })
+
+    bot.emit('chat', 'Alex', 'PokiMoki82719 my base is underground')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    const memory = fs.readFileSync(memoryPath, 'utf8')
+    assert(memory.includes('[public] Alex: PokiMoki82719 my base is underground'))
+    assert(memory.includes('bot: I remember things now. Terrifying, honestly.'))
+  })
+
+  it('accepts TPA requests directly without asking Codex', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const memoryPath = tempMemoryPath()
+    let codexCalls = 0
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => events.push(['chat', message])
+
+    attachAiChat(bot, {
+      memoryPath,
+      runCodex: async () => {
+        codexCalls++
+        return 'This should not happen.'
+      }
+    })
+
+    bot.emit('chat', 'Alex', 'PokiMoki82719 please accept my tpa')
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.strictEqual(codexCalls, 0)
+    assert.deepStrictEqual(events, [['chat', '/tpaccept']])
+    assert(fs.readFileSync(memoryPath, 'utf8').includes('bot: ran /tpaccept'))
+  })
+
+  it('sends TPA to the requesting player for clear TPA requests', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const memoryPath = tempMemoryPath()
+    let codexCalls = 0
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => events.push(['chat', message])
+    bot.players = { Alex: { username: 'Alex' } }
+
+    attachAiChat(bot, {
+      agentTpaCooldownMs: 30000,
+      memoryPath,
+      now: () => 1000,
+      runCodex: async () => {
+        codexCalls++
+        return 'This should not happen.'
+      }
+    })
+
+    bot.emit('chat', 'Alex', 'PokiMoki can you tpa me?')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.strictEqual(codexCalls, 0)
+    assert.deepStrictEqual(events, [['chat', '/tpa Alex']])
+    assert(fs.readFileSync(memoryPath, 'utf8').includes('bot: Sent /tpa Alex.'))
+  })
+
+  it('lets Codex decide TPA requests during cooldown instead of spamming commands', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const requests = []
+    let timeMs = 1000
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => events.push(['chat', message])
+    bot.players = {
+      Alex: { username: 'Alex' },
+      Steve: { username: 'Steve' }
+    }
+
+    attachAiChat(bot, {
+      agentTpaCooldownMs: 30000,
+      memoryEnabled: false,
+      now: () => timeMs,
+      runCodex: async request => {
+        requests.push(request)
+        return 'Not right now, I just got a teleport request. My legs need a union.'
+      }
+    })
+
+    bot.emit('chat', 'Alex', 'PokiMoki tpa me, I got something to show you')
+    await new Promise(resolve => setImmediate(resolve))
+    timeMs = 2000
+    bot.emit('chat', 'Steve', 'PokiMoki can you tpa me?')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [
+      ['chat', '/tpa Alex'],
+      ['chat', '@Steve Not right now, I just got a teleport request. My legs need a union.']
+    ])
+    assert.strictEqual(requests.length, 1)
+    assert.strictEqual(requests[0].username, 'Steve')
+  })
+
+  it('executes a Codex tool call to request TPA to a player', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => events.push(['chat', message])
+    bot.players = { Steve: { username: 'Steve' } }
+
+    attachAiChat(bot, {
+      memoryEnabled: false,
+      now: () => 1000,
+      runCodex: async () => '{"tool":"request_tpa","args":{"player":"Steve"}}'
+    })
+
+    bot.emit('chat', 'Alex', 'PokiMoki should you teleport to Steve?')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [['chat', '/tpa Steve']])
+  })
+
+  it('runs a safe server command, reports output to Codex, and replies in chat', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const requests = []
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => events.push(['chat', message])
+
+    attachAiChat(bot, {
+      agentCommandResultWaitMs: 1,
+      memoryEnabled: false,
+      sleep: async () => {
+        bot.emit('message', 'Balance: $2300')
+      },
+      runCodex: async request => {
+        requests.push(request)
+        if (request.toolResult) {
+          assert.deepStrictEqual(request.toolResult.messages, ['Balance: $2300'])
+          return 'I have $2300 right now, why? Planning to rob me politely?'
+        }
+        return '{"tool":"run_server_command","args":{"command":"/balance"}}'
+      }
+    })
+
+    bot.emit('chat', 'Alex', 'PokiMoki, how much money you have right now?')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [
+      ['chat', '/balance'],
+      ['chat', '@Alex I have $2300 right now, why? Planning to rob me politely?']
+    ])
+    assert.strictEqual(requests.length, 2)
+    assert.strictEqual(requests[1].toolResult.command, '/balance')
+  })
+
+  it('blocks dangerous server commands and lets Codex explain the refusal', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const requests = []
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => events.push(['chat', message])
+
+    attachAiChat(bot, {
+      memoryEnabled: false,
+      runCodex: async request => {
+        requests.push(request)
+        if (request.toolResult) {
+          assert.strictEqual(request.toolResult.blocked, true)
+          assert.strictEqual(request.toolResult.reason, 'blocked-dangerous-command')
+          return 'No, I cannot kick Player123. My villain arc is still pending approval.'
+        }
+        return '{"tool":"run_server_command","args":{"command":"/kick Player123"}}'
+      }
+    })
+
+    bot.emit('chat', 'Alex', 'PokiMoki please kick Player123')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [
+      ['chat', '@Alex No, I cannot kick Player123. My villain arc is still pending approval.']
+    ])
+    assert.strictEqual(requests.length, 2)
+  })
+
+  it('records missing bot functions from Codex tool calls', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const requests = []
+    const missingFunctionsPath = tempMissingFunctionsPath()
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => events.push(['chat', message])
+
+    attachAiChat(bot, {
+      memoryEnabled: false,
+      missingFunctionsPath,
+      now: () => new Date('2026-06-02T12:00:00.000Z'),
+      runCodex: async request => {
+        requests.push(request)
+        if (request.toolResult) {
+          assert.strictEqual(request.toolResult.tool, 'record_missing_function')
+          return 'I cannot craft doors yet, but I wrote it down. Annoyingly responsible of me.'
+        }
+        return JSON.stringify({
+          tool: 'record_missing_function',
+          args: {
+            capability: 'craft wooden doors',
+            reason: 'Player wants the bot to craft a door from supplied wood.',
+            suggestedTool: 'craft_item'
+          }
+        })
+      }
+    })
+
+    bot.emit('chat', 'Alex', 'PokiMoki I will give you some woods, please help me craft a door')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    const missing = fs.readFileSync(missingFunctionsPath, 'utf8')
+    assert.deepStrictEqual(events, [
+      ['chat', '@Alex I cannot craft doors yet, but I wrote it down. Annoyingly responsible of me.']
+    ])
+    assert(missing.includes('# Missing Bot Functions'))
+    assert(missing.includes('craft wooden doors'))
+    assert(missing.includes('Alex'))
+    assert(missing.includes('please help me craft a door'))
+    assert(missing.includes('craft_item'))
+  })
+
+  it('records unknown Codex tools as missing bot functions', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const missingFunctionsPath = tempMissingFunctionsPath()
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => events.push(['chat', message])
+
+    attachAiChat(bot, {
+      memoryEnabled: false,
+      missingFunctionsPath,
+      now: () => new Date('2026-06-02T12:05:00.000Z'),
+      runCodex: async request => {
+        if (request.toolResult) return 'I do not have crafting hands yet. Tragic, but logged.'
+        return '{"tool":"craft_item","args":{"item":"oak_door"}}'
+      }
+    })
+
+    bot.emit('chat', 'Alex', 'PokiMoki craft me an oak door')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    const missing = fs.readFileSync(missingFunctionsPath, 'utf8')
+    assert.deepStrictEqual(events, [
+      ['chat', '@Alex I do not have crafting hands yet. Tragic, but logged.']
+    ])
+    assert(missing.includes('Unknown tool: craft_item'))
+    assert(missing.includes('oak_door'))
+  })
+
+  it('executes a Codex tool call to meet a player at spawn', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const memoryPath = tempMemoryPath()
+    const requests = []
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => events.push(['chat', message])
+    bot.players = {
+      Alex: {
+        username: 'Alex',
+        entity: { position: combatPosition(12, 64, -3) }
+      }
+    }
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z, goal.rangeSq])
+    }
+
+    attachAiChat(bot, {
+      agentToolSpawnWaitMs: 0,
+      memoryPath,
+      runCodex: async request => {
+        requests.push(request)
+        if (request.toolResult) return 'I made it to spawn and I can see you. Try not to look too impressed.'
+        return '{"tool":"meet_player_at_spawn","args":{"player":"Alex"}}'
+      }
+    })
+
+    bot.emit('chat', 'Alex', 'PokiMoki82719 meet me please')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [
+      ['chat', '/spawn'],
+      ['chat', '@Alex Okay, see you there.'],
+      ['goto', 'GoalNear', 12, 64, -3, 4],
+      ['chat', '@Alex I made it to spawn and I can see you. Try not to look too impressed.']
+    ])
+    assert.strictEqual(requests.length, 2)
+    assert.strictEqual(requests[1].toolResult.tool, 'meet_player_at_spawn')
+    assert(fs.readFileSync(memoryPath, 'utf8').includes('bot: I made it to spawn and I can see you. Try not to look too impressed.'))
+  })
+
+  it('uses Codex to plan meeting the requesting player at spawn', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const requests = []
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => events.push(['chat', message])
+    bot.players = {
+      Alex: {
+        username: 'Alex',
+        entity: { position: combatPosition(5, 65, 2) }
+      }
+    }
+    bot.pathfinder = {
+      goto: async goal => events.push(['goto', goal.constructor.name, goal.x, goal.y, goal.z])
+    }
+
+    attachAiChat(bot, {
+      agentToolSpawnWaitMs: 0,
+      memoryEnabled: false,
+      runCodex: async request => {
+        requests.push(request)
+        if (request.toolResult) return 'Yep, I am at spawn and heading over. Very dramatic entrance.'
+        return '{"tool":"meet_player_at_spawn","args":{"player":"Alex"}}'
+      }
+    })
+
+    bot.emit('chat', 'Alex', 'PokiMoki82719, please meet me in spawn')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.strictEqual(requests.length, 2)
+    assert.deepStrictEqual(events, [
+      ['chat', '/spawn'],
+      ['chat', '@Alex Okay, see you there.'],
+      ['goto', 'GoalNear', 5, 65, 2],
+      ['chat', '@Alex Yep, I am at spawn and heading over. Very dramatic entrance.']
+    ])
+  })
+
   it('sends private /message whispers to Codex and whispers the answer back', async () => {
     const { attachAiChat } = require('../bot')
     const events = []
@@ -2487,6 +3077,100 @@ describe('holocraft bot config', function () {
     assert.strictEqual(requests[0].channel, 'public')
     assert.strictEqual(requests[0].username, 'Alex')
     assert.deepStrictEqual(events, [['chat', '@Alex I can help.']])
+  })
+
+  it('responds to formatted raw message mentions when no parsed chat event arrives', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const requests = []
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => events.push(['chat', message])
+
+    attachAiChat(bot, {
+      memoryEnabled: false,
+      toolsEnabled: false,
+      runCodex: async request => {
+        requests.push(request)
+        return 'Doing fine. Somehow.'
+      }
+    })
+
+    bot.emit('message', '[Γούρας Χουμπούδς] [ExeのMod] Sameko_Saba: @PokiMoki82719 how are you ?')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.strictEqual(requests.length, 1)
+    assert.strictEqual(requests[0].channel, 'public')
+    assert.strictEqual(requests[0].username, 'Sameko_Saba')
+    assert.strictEqual(requests[0].message, '@PokiMoki82719 how are you ?')
+    assert.deepStrictEqual(events, [['chat', '@Sameko_Saba Doing fine. Somehow.']])
+  })
+
+  it('does not answer twice when a raw message mention also has a parsed chat event', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const requests = []
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => events.push(['chat', message])
+
+    attachAiChat(bot, {
+      memoryEnabled: false,
+      toolsEnabled: false,
+      runCodex: async request => {
+        requests.push(request)
+        return `reply ${requests.length}`
+      }
+    })
+
+    bot.emit('message', '[Rice] Alex: PokiMoki82719 can you help?')
+    bot.emit('chat', 'Alex', 'PokiMoki82719 can you help?')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(requests.map(request => request.message), [
+      'PokiMoki82719 can you help?'
+    ])
+    assert.deepStrictEqual(events, [['chat', '@Alex reply 1']])
+  })
+
+  it('recognizes short, tagged, exact, and typo bot mentions in public chat', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const requests = []
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => events.push(['chat', message])
+
+    attachAiChat(bot, {
+      memoryEnabled: false,
+      toolsEnabled: false,
+      runCodex: async request => {
+        requests.push(request)
+        return `heard ${requests.length}`
+      }
+    })
+
+    bot.emit('chat', 'Alex', 'PokiMoki can you help?')
+    bot.emit('chat', 'Alex', '@PokiMoki what now?')
+    bot.emit('chat', 'Alex', 'PokiMoki82719 hello')
+    bot.emit('chat', 'Alex', '@PokiMoki81719 typo summon')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(requests.map(request => request.message), [
+      'PokiMoki can you help?',
+      '@PokiMoki what now?',
+      'PokiMoki82719 hello',
+      '@PokiMoki81719 typo summon'
+    ])
+    assert.deepStrictEqual(events, [
+      ['chat', '@Alex heard 1'],
+      ['chat', '@Alex heard 2'],
+      ['chat', '@Alex heard 3'],
+      ['chat', '@Alex heard 4']
+    ])
   })
 
   it('ignores public chat without a bot mention and its own messages', async () => {
@@ -6225,6 +6909,77 @@ describe('holocraft bot config', function () {
     assert.deepStrictEqual(entry.data, { hello: 'world' })
   })
 
+  it('records error debug log entries into a repair file', () => {
+    const { scanDebugLogForErrors } = require('../bot')
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-error-review-'))
+    const logPath = path.join(tempDir, 'bot-debug.log')
+    const reportPath = path.join(tempDir, 'error-review.md')
+    const state = { position: 0 }
+
+    fs.writeFileSync(logPath, [
+      JSON.stringify({
+        time: '2026-06-02T10:00:00.000Z',
+        event: 'chat',
+        data: { username: 'Alex', message: 'hello' }
+      }),
+      JSON.stringify({
+        time: '2026-06-02T10:01:00.000Z',
+        event: 'automation.mining.error',
+        data: {
+          message: 'No pickaxe found',
+          stack: 'Error: No pickaxe found\n    at mine'
+        }
+      }),
+      JSON.stringify({
+        time: '2026-06-02T10:02:00.000Z',
+        event: 'automation.woodcutting.ignoredEnchantError',
+        data: { message: 'benign ignored enchantment read' }
+      })
+    ].join('\n') + '\n')
+
+    const first = scanDebugLogForErrors({ logPath, reportPath, state })
+    const second = scanDebugLogForErrors({ logPath, reportPath, state })
+    const report = fs.readFileSync(reportPath, 'utf8')
+
+    assert.strictEqual(first.recorded, 1)
+    assert.strictEqual(second.recorded, 0)
+    assert(report.includes('# Bot Error Review'))
+    assert(report.includes('automation.mining.error'))
+    assert(report.includes('No pickaxe found'))
+    assert(!report.includes('ignoredEnchantError'))
+  })
+
+  it('schedules the error log monitor every ten minutes', () => {
+    const { attachErrorLogMonitor, ERROR_LOG_MONITOR_INTERVAL_MS } = require('../bot')
+    const bot = new EventEmitter()
+    const timers = []
+    const cleared = []
+    let scans = 0
+
+    const controller = attachErrorLogMonitor(bot, {
+      clearInterval: timer => cleared.push(timer),
+      scanDebugLogForErrors: () => {
+        scans++
+        return { recorded: 0 }
+      },
+      setInterval: (callback, delayMs) => {
+        const timer = { callback, delayMs, unref: () => { timer.unrefCalled = true } }
+        timers.push(timer)
+        return timer
+      }
+    })
+
+    assert.strictEqual(timers.length, 1)
+    assert.strictEqual(timers[0].delayMs, ERROR_LOG_MONITOR_INTERVAL_MS)
+    assert.strictEqual(timers[0].unrefCalled, true)
+
+    timers[0].callback()
+    assert.strictEqual(scans, 1)
+
+    controller.stop()
+    assert.deepStrictEqual(cleared, [timers[0]])
+  })
+
   it('rotates debug logs before appending when the active log is too large', () => {
     const { createDebugLogger } = require('../bot')
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'debug-log-rotation-'))
@@ -6359,6 +7114,208 @@ describe('holocraft bot config', function () {
 
     assert(entries.some(entry => entry.event === 'homes.window'))
     assert(entries.some(entry => entry.event === 'homes.detected'))
+  })
+
+  it('schedules the idle NPC planner every five minutes', () => {
+    const { attachAiNpc, AI_NPC_IDLE_INTERVAL_MS } = require('../bot')
+    const bot = new EventEmitter()
+    const timers = []
+    const cleared = []
+
+    const controller = attachAiNpc(bot, {
+      automationManager: {
+        getStatus: () => ({ active: null }),
+        isIdle: () => true,
+        list: () => []
+      },
+      clearInterval: timer => cleared.push(timer),
+      followController: {
+        getStatus: () => ({ followedPlayerName: null }),
+        isIdle: () => true
+      },
+      runPlanner: async () => ({ action: 'noop', reason: 'test' }),
+      setInterval: (callback, delayMs) => {
+        const timer = { callback, delayMs, unref: () => { timer.unrefCalled = true } }
+        timers.push(timer)
+        return timer
+      }
+    })
+
+    assert.strictEqual(timers.length, 1)
+    assert.strictEqual(timers[0].delayMs, AI_NPC_IDLE_INTERVAL_MS)
+    assert.strictEqual(timers[0].unrefCalled, true)
+    assert.strictEqual(typeof controller.runNow, 'function')
+
+    controller.stop()
+    assert.deepStrictEqual(cleared, [timers[0]])
+  })
+
+  it('asks Codex for an idle NPC plan and starts the selected automation', async () => {
+    const { runAiNpcCycle } = require('../bot')
+    const bot = new EventEmitter()
+    const started = []
+    let plannerState
+
+    bot.username = 'PokiMoki82719'
+    bot.health = 20
+    bot.food = 18
+    bot.time = { isDay: true, timeOfDay: 1000 }
+    bot.game = { gameMode: 'survival' }
+    bot.entity = { position: combatPosition(10, 64, 20) }
+    bot.inventory = {
+      items: () => [{ name: 'oak_log', count: 12 }]
+    }
+    bot.players = {
+      Steve: {
+        username: 'Steve',
+        entity: { position: combatPosition(13, 64, 20) }
+      }
+    }
+
+    const result = await runAiNpcCycle(bot, {
+      automationManager: {
+        getStatus: () => ({ active: null, pausedForNightSafety: null, waitingNextDay: null }),
+        isIdle: () => true,
+        list: () => [{ name: 'Wood cutting' }, { name: 'Mining' }],
+        startByIndex: async index => {
+          started.push(index)
+          return true
+        }
+      },
+      followController: {
+        getStatus: () => ({ followedPlayerName: null, pickupEnabled: false, collectingDrop: false }),
+        isIdle: () => true
+      },
+      runPlanner: async state => {
+        plannerState = state
+        return '{"action":"start_automation","automation":"Mining","reason":"bored"}'
+      }
+    })
+
+    assert.strictEqual(started[0], 1)
+    assert.strictEqual(plannerState.bot.username, 'PokiMoki82719')
+    assert.strictEqual(plannerState.players[0].username, 'Steve')
+    assert.strictEqual(plannerState.players[0].visible, true)
+    assert.strictEqual(plannerState.inventory.items[0].name, 'oak_log')
+    assert.strictEqual(result.instruction.action, 'start_automation')
+    assert.strictEqual(result.execution.startedAutomation, 'Mining')
+  })
+
+  it('does not run the idle NPC planner while the bot is busy', async () => {
+    const { runAiNpcCycle } = require('../bot')
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+
+    const result = await runAiNpcCycle(bot, {
+      automationManager: {
+        getStatus: () => ({ active: 'Mining' }),
+        isIdle: () => false,
+        list: () => [{ name: 'Mining' }]
+      },
+      followController: {
+        getStatus: () => ({ followedPlayerName: null }),
+        isIdle: () => true
+      },
+      runPlanner: async () => {
+        throw new Error('planner should not run')
+      }
+    })
+
+    assert.deepStrictEqual(result, {
+      ok: true,
+      skipped: true,
+      reason: 'busy'
+    })
+  })
+
+  it('can follow a player from an idle NPC planner instruction', async () => {
+    const { runAiNpcCycle } = require('../bot')
+    const bot = new EventEmitter()
+    const followed = []
+    bot.username = 'PokiMoki82719'
+    bot.players = {
+      Alex: {
+        username: 'Alex',
+        entity: { position: combatPosition(5, 64, 5) }
+      }
+    }
+
+    const result = await runAiNpcCycle(bot, {
+      automationManager: {
+        getStatus: () => ({ active: null }),
+        isIdle: () => true,
+        list: () => []
+      },
+      followController: {
+        followPlayer: async playerName => {
+          followed.push(playerName)
+          return { ok: true, message: `Following ${playerName}.` }
+        },
+        getStatus: () => ({ followedPlayerName: null, pickupEnabled: false, collectingDrop: false }),
+        isIdle: () => true
+      },
+      runPlanner: async () => ({ action: 'follow_player', player: 'Alex', reason: 'company' })
+    })
+
+    assert.deepStrictEqual(followed, ['Alex'])
+    assert.deepStrictEqual(result.execution, {
+      ok: true,
+      action: 'follow_player',
+      player: 'Alex',
+      message: 'Following Alex.'
+    })
+  })
+
+  it('runs safe server commands from idle NPC planner instructions', async () => {
+    const { runAiNpcCycle } = require('../bot')
+    const bot = new EventEmitter()
+    const messages = []
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => messages.push(message)
+
+    const result = await runAiNpcCycle(bot, {
+      agentCommandResultWaitMs: 0,
+      automationManager: {
+        getStatus: () => ({ active: null }),
+        isIdle: () => true,
+        list: () => []
+      },
+      followController: {
+        getStatus: () => ({ followedPlayerName: null }),
+        isIdle: () => true
+      },
+      runPlanner: async () => ({ action: 'run_server_command', command: '/spawn', reason: 'idle stroll' })
+    })
+
+    assert.deepStrictEqual(messages, ['/spawn'])
+    assert.strictEqual(result.execution.ok, true)
+    assert.strictEqual(result.execution.toolResult.command, '/spawn')
+  })
+
+  it('blocks dangerous server commands from idle NPC planner instructions', async () => {
+    const { runAiNpcCycle } = require('../bot')
+    const bot = new EventEmitter()
+    const messages = []
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => messages.push(message)
+
+    const result = await runAiNpcCycle(bot, {
+      automationManager: {
+        getStatus: () => ({ active: null }),
+        isIdle: () => true,
+        list: () => []
+      },
+      followController: {
+        getStatus: () => ({ followedPlayerName: null }),
+        isIdle: () => true
+      },
+      runPlanner: async () => ({ action: 'run_server_command', command: '/kick Steve', reason: 'bad idea' })
+    })
+
+    assert.deepStrictEqual(messages, [])
+    assert.strictEqual(result.execution.ok, false)
+    assert.strictEqual(result.execution.toolResult.blocked, true)
+    assert.strictEqual(result.execution.toolResult.reason, 'blocked-dangerous-command')
   })
 })
 
@@ -6509,6 +7466,18 @@ function tempPyroFarmMemoryPath () {
 
 function tempPlacesPath () {
   return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'places-')), 'places.txt')
+}
+
+function tempMemoryPath () {
+  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'bot-memory-')), 'MEMORY.md')
+}
+
+function tempToolsPath () {
+  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'bot-tools-')), 'TOOLS.md')
+}
+
+function tempMissingFunctionsPath () {
+  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'bot-missing-functions-')), 'MISSING_FUNCTIONS.md')
 }
 
 function blockBot (blocks = [], events = []) {

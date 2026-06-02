@@ -1,5 +1,6 @@
 module.exports = {
   ...require('./aiChat'),
+  ...require('./aiNpc'),
   ...require('./automations'),
   ...require('./autoEat'),
   ...require('./combat'),
@@ -14,6 +15,7 @@ module.exports = {
   ...require('./farming'),
   ...require('./follow'),
   ...require('./homes'),
+  ...require('./issueRecorder'),
   ...require('./knockbackPause'),
   ...require('./logTerminal'),
   ...require('./logViewer'),

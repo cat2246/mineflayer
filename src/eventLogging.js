@@ -1,4 +1,9 @@
-const { DEFAULT_HOST, PHYSICS_ENABLE_DELAY_MS } = require('./config')
+const {
+  DEFAULT_HOST,
+  PHYSICS_ENABLE_DELAY_MS,
+  PLAYER_GREETING_COOLDOWN_MS,
+  PLAYER_GREETING_STARTUP_DELAY_MS
+} = require('./config')
 const { createDebugLogger } = require('./debugLogger')
 const { joinSurvivalWorld, loginToServer } = require('./survival')
 const { sleep } = require('./time')
@@ -35,7 +40,91 @@ function attachEventLogging (bot, options = {}) {
   const showViewer = options.startViewer || startViewer
   const wait = options.sleep || sleep
   const debugLog = options.debugLog || createDebugLogger()
+  const greetingCooldownMs = options.playerGreetingCooldownMs ?? PLAYER_GREETING_COOLDOWN_MS
+  const greetingStartupDelayMs = options.playerGreetingStartupDelayMs ?? PLAYER_GREETING_STARTUP_DELAY_MS
+  const now = options.now || Date.now
+  const setGreetingTimeout = options.setTimeout || setTimeout
   let spawnCount = 0
+  let playerGreetingEnabled = false
+  let lastPlayerGreetingAt = null
+  let playerGreetingTimer = null
+  let playerGreetingStartupTimer = null
+  const knownPlayers = new Set(Object.keys(bot.players || {}).filter(Boolean))
+  const queuedGreetings = []
+  const queuedGreetingUsernames = new Set()
+
+  function rememberCurrentPlayers () {
+    for (const username of Object.keys(bot.players || {})) {
+      if (username) knownPlayers.add(username)
+    }
+    if (bot.username) knownPlayers.add(bot.username)
+  }
+
+  function sendPlayerGreeting (username) {
+    bot.chat(`hi ${username}`)
+    lastPlayerGreetingAt = now()
+    debugLog('playerJoined.greeted', { username, cooldownMs: greetingCooldownMs })
+  }
+
+  function schedulePlayerGreeting () {
+    if (playerGreetingTimer || queuedGreetings.length === 0) return
+
+    const elapsedMs = lastPlayerGreetingAt === null ? Infinity : now() - lastPlayerGreetingAt
+    const waitMs = Math.max(0, greetingCooldownMs - elapsedMs)
+    if (waitMs <= 0) {
+      const username = queuedGreetings.shift()
+      queuedGreetingUsernames.delete(username)
+      sendPlayerGreeting(username)
+      schedulePlayerGreeting()
+      return
+    }
+
+    playerGreetingTimer = setGreetingTimeout(() => {
+      playerGreetingTimer = null
+      schedulePlayerGreeting()
+    }, waitMs)
+    if (typeof playerGreetingTimer?.unref === 'function') playerGreetingTimer.unref()
+  }
+
+  function queuePlayerGreeting (username) {
+    if (queuedGreetingUsernames.has(username)) return
+    queuedGreetingUsernames.add(username)
+    queuedGreetings.push(username)
+    schedulePlayerGreeting()
+  }
+
+  function removeQueuedGreeting (username) {
+    if (!queuedGreetingUsernames.delete(username)) return
+
+    const index = queuedGreetings.indexOf(username)
+    if (index !== -1) queuedGreetings.splice(index, 1)
+  }
+
+  function enablePlayerGreeting () {
+    rememberCurrentPlayers()
+    playerGreetingEnabled = true
+    debugLog('playerGreeting.enabled', { knownPlayers: knownPlayers.size, cooldownMs: greetingCooldownMs })
+  }
+
+  function startPlayerGreetingSync () {
+    rememberCurrentPlayers()
+    debugLog('playerGreeting.syncing', {
+      knownPlayers: knownPlayers.size,
+      cooldownMs: greetingCooldownMs,
+      startupDelayMs: greetingStartupDelayMs
+    })
+
+    if (greetingStartupDelayMs <= 0) {
+      enablePlayerGreeting()
+      return
+    }
+
+    playerGreetingStartupTimer = setGreetingTimeout(() => {
+      playerGreetingStartupTimer = null
+      enablePlayerGreeting()
+    }, greetingStartupDelayMs)
+    if (typeof playerGreetingStartupTimer?.unref === 'function') playerGreetingStartupTimer.unref()
+  }
 
   bot.once('login', () => {
     console.log(`Logged in as ${bot.username}`)
@@ -85,6 +174,7 @@ function attachEventLogging (bot, options = {}) {
         debugLog('command.error', { command: '/survival', error: err.message })
       }
 
+      startPlayerGreetingSync()
       return
     }
 
@@ -101,6 +191,33 @@ function attachEventLogging (bot, options = {}) {
 
   bot.on('chat', (username, message) => {
     debugLog('chat', { username, message })
+  })
+
+  bot.on('playerJoined', (player) => {
+    const username = player?.username
+    if (!username || username === bot.username || typeof bot.chat !== 'function') return
+
+    if (!playerGreetingEnabled) {
+      knownPlayers.add(username)
+      debugLog('playerJoined.greetingSkipped', { username, reason: 'startup' })
+      return
+    }
+
+    if (knownPlayers.has(username)) {
+      debugLog('playerJoined.greetingSkipped', { username, reason: 'already-present' })
+      return
+    }
+
+    knownPlayers.add(username)
+    queuePlayerGreeting(username)
+  })
+
+  bot.on('playerLeft', (player) => {
+    const username = player?.username
+    if (!username || username === bot.username) return
+
+    knownPlayers.delete(username)
+    removeQueuedGreeting(username)
   })
 
   bot.on('message', (message) => {
