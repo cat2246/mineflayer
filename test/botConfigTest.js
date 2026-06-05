@@ -35,6 +35,35 @@ describe('holocraft bot config', function () {
     assert.deepStrictEqual(life.recentEvents, [])
   })
 
+  it('resolves sanitized per-bot memory paths from bot username', () => {
+    const { resolveBotMemoryPaths } = require('../bot')
+    const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'bot-memory-')), 'bots')
+
+    const paths = resolveBotMemoryPaths({
+      username: 'Pyro Farm/Bot'
+    }, { botMemoryRoot: root })
+
+    assert.strictEqual(paths.botId, 'pyro-farm-bot')
+    assert.strictEqual(paths.root, path.join(root, 'pyro-farm-bot'))
+    assert.strictEqual(paths.missingToolsPath, path.join(root, 'pyro-farm-bot', 'missing-tools.json'))
+    assert.strictEqual(paths.memorySummaryPath, path.join(root, 'pyro-farm-bot', 'memory-summary.json'))
+    assert.strictEqual(paths.eventLogPath, path.join(root, 'pyro-farm-bot', 'event-log.jsonl'))
+    assert.strictEqual(paths.debugLogPath, path.join(root, 'pyro-farm-bot', 'debug.log'))
+  })
+
+  it('uses configured profile id before username for per-bot memory', () => {
+    const { resolveBotMemoryPaths } = require('../bot')
+    const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'bot-memory-')), 'bots')
+
+    const paths = resolveBotMemoryPaths({
+      username: 'VisibleName',
+      profile: { id: '1234-ABCD main' }
+    }, { botMemoryRoot: root })
+
+    assert.strictEqual(paths.botId, '1234-abcd-main')
+    assert.strictEqual(paths.root, path.join(root, '1234-abcd-main'))
+  })
+
   it('normalizes malformed NPC life state safely', () => {
     const { normalizeNpcLife } = require('../bot')
 

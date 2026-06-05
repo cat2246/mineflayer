@@ -3,6 +3,7 @@ module.exports = {
   ...require('./aiNpc'),
   ...require('./automations'),
   ...require('./autoEat'),
+  ...require('./botMemory'),
   ...require('./combat'),
   ...require('./commandConsole'),
   ...require('./config'),
