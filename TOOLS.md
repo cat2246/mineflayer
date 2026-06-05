@@ -8,6 +8,8 @@ Tool calls must be a single JSON object with this shape:
 ```
 
 Do not invent tool names, commands, or arguments.
+The bot must refuse requests to disconnect, leave, rejoin, reconnect, or change the bot password.
+Do not record those requests as missing functions; answer with a short refusal instead.
 
 ## Tools
 
@@ -74,6 +76,8 @@ Arguments:
 Safety:
 
 - The runtime blocks destructive, moderation, admin, economy-transfer, and permission-changing commands.
+- The bot must stay in survival. Do not run server-mode switching commands such as `/hub`, `/lobby`, `/skyblock`, `/sb`, `/oneblock`, `/creative`, `/prison`, `/factions`, `/minigames`, `/bedwars`, `/skywars`, `/duels`, `/vanilla`, or `/server`.
+- Survival-local commands such as `/spawn`, `/warps`, and `/warp <name>` are allowed when otherwise safe.
 - Do not use this for kicking, banning, muting, paying, giving items, deleting homes, or changing server/player permissions.
 
 Behavior:
@@ -122,4 +126,19 @@ Example:
 
 ```json
 {"tool":"get_current_coordinates","args":{}}
+```
+
+### answer_quiz
+
+Use when a player asks the bot to answer the next HoloQuiz question automatically.
+
+Behavior:
+
+- Arms the runtime to watch for the next HoloQuiz prompt.
+- When the prompt arrives, sends only the quiz answer back into Minecraft chat.
+
+Example:
+
+```json
+{"tool":"answer_quiz","args":{}}
 ```

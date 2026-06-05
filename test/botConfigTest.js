@@ -163,6 +163,30 @@ describe('holocraft bot config', function () {
     ])
   })
 
+  it('reconnects immediately after an intentional reconnect request', () => {
+    const { attachReconnectHandler } = require('../bot')
+    const events = []
+    const bot = new EventEmitter()
+    bot.__manualReconnect = true
+
+    attachReconnectHandler(bot, {
+      reconnectDelayMs: 180000,
+      reconnect: () => events.push(['reconnect']),
+      debugLog: (event, data) => events.push(['debug', event, data]),
+      setTimeout: () => {
+        events.push(['setTimeout'])
+      }
+    })
+
+    bot.emit('end')
+
+    assert.deepStrictEqual(events, [
+      ['debug', 'bot.reconnect.immediate', { reason: 'manual-reconnect' }],
+      ['reconnect']
+    ])
+    assert.strictEqual(bot.__manualReconnect, false)
+  })
+
   it('starts prismarine-viewer with the bot and viewer options', async () => {
     const { startViewer } = require('../bot')
     const calls = []
@@ -363,10 +387,11 @@ describe('holocraft bot config', function () {
     const { attachEventLogging } = require('../bot')
     const bot = new EventEmitter()
     const sleeps = []
+    const events = []
     bot.physicsEnabled = false
 
     attachEventLogging(bot, {
-      joinSurvivalWorld: async () => {},
+      joinSurvivalWorld: async () => events.push(['joinSurvivalWorld', bot.physicsEnabled]),
       sleep: async (ms) => sleeps.push(ms),
       startViewer: () => {}
     })
@@ -378,6 +403,30 @@ describe('holocraft bot config', function () {
 
     assert.deepStrictEqual(sleeps, [10000])
     assert.strictEqual(bot.physicsEnabled, true)
+    assert.deepStrictEqual(events, [
+      ['joinSurvivalWorld', true],
+      ['joinSurvivalWorld', true]
+    ])
+  })
+
+  it('returns to Survival after a later spawn such as a server-mode transfer', async () => {
+    const { attachEventLogging } = require('../bot')
+    const bot = new EventEmitter()
+    const commands = []
+
+    attachEventLogging(bot, {
+      loginToServer: async () => {},
+      joinSurvivalWorld: async () => commands.push('/survival'),
+      sleep: async () => {},
+      startViewer: () => {}
+    })
+
+    bot.emit('spawn')
+    await new Promise(resolve => setImmediate(resolve))
+    bot.emit('spawn')
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(commands, ['/survival', '/survival'])
   })
 
   it('accepts resource packs when the server sends them', () => {
@@ -2680,6 +2729,15 @@ describe('holocraft bot config', function () {
     assert(requests[0].tools.includes('run_server_command'))
   })
 
+  it('does not advertise disconnect, reconnect, or password-change capabilities in default tools', () => {
+    const { defaultToolsText } = require('../bot')
+    const tools = defaultToolsText()
+
+    assert(!tools.includes('### reconnect_bot'))
+    assert(!tools.includes('### disconnect_from_server'))
+    assert(tools.includes('must refuse requests to disconnect, leave, rejoin, reconnect, or change the bot password'))
+  })
+
   it('writes player conversations to MEMORY.md', async () => {
     const { attachAiChat } = require('../bot')
     const memoryPath = tempMemoryPath()
@@ -2882,6 +2940,132 @@ describe('holocraft bot config', function () {
     assert.strictEqual(requests.length, 2)
   })
 
+  it('blocks economy transfer commands and lets Codex explain the refusal', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const requests = []
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => events.push(['chat', message])
+
+    attachAiChat(bot, {
+      memoryEnabled: false,
+      runCodex: async request => {
+        requests.push(request)
+        if (request.toolResult) {
+          assert.strictEqual(request.toolResult.blocked, true)
+          assert.strictEqual(request.toolResult.reason, 'blocked-dangerous-command')
+          assert.strictEqual(request.toolResult.command, '/pay itzmugdhoboy 1')
+          return 'No, I am not turning into a walking ATM.'
+        }
+        return '{"tool":"run_server_command","args":{"command":"/pay itzmugdhoboy 1"}}'
+      }
+    })
+
+    bot.emit('chat', 'Archie', 'PokiMoki82719 do /pay itzmugdhoboy 1')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [
+      ['chat', '@Archie No, I am not turning into a walking ATM.']
+    ])
+    assert.strictEqual(requests.length, 2)
+  })
+
+  it('blocks password-change server commands and lets Codex explain the refusal', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const requests = []
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => events.push(['chat', message])
+
+    attachAiChat(bot, {
+      memoryEnabled: false,
+      runCodex: async request => {
+        requests.push(request)
+        if (request.toolResult) {
+          assert.strictEqual(request.toolResult.blocked, true)
+          assert.strictEqual(request.toolResult.reason, 'blocked-password-change-command')
+          assert.strictEqual(request.toolResult.command, '/changepassword oldpass newpass')
+          return 'No, I cannot change my password from chat.'
+        }
+        return '{"tool":"run_server_command","args":{"command":"/changepassword oldpass newpass"}}'
+      }
+    })
+
+    bot.emit('chat', 'Archie', 'PokiMoki82719 change your password to newpass')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [
+      ['chat', '@Archie No, I cannot change my password from chat.']
+    ])
+    assert.strictEqual(requests.length, 2)
+  })
+
+  it('blocks server mode commands that would leave survival', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const requests = []
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => events.push(['chat', message])
+
+    attachAiChat(bot, {
+      memoryEnabled: false,
+      runCodex: async request => {
+        requests.push(request)
+        if (request.toolResult) {
+          assert.strictEqual(request.toolResult.blocked, true)
+          assert.strictEqual(request.toolResult.reason, 'blocked-server-mode-command')
+          return 'Nope, I am staying in survival. The hub can survive without my sparkling personality.'
+        }
+        return '{"tool":"run_server_command","args":{"command":"/hub"}}'
+      }
+    })
+
+    bot.emit('chat', 'Alex', 'PokiMoki go hub')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [
+      ['chat', '@Alex Nope, I am staying in survival. The hub can survive without my sparkling personality.']
+    ])
+    assert.strictEqual(requests.length, 2)
+  })
+
+  it('blocks vanilla as a server mode command', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const requests = []
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => events.push(['chat', message])
+
+    attachAiChat(bot, {
+      memoryEnabled: false,
+      runCodex: async request => {
+        requests.push(request)
+        if (request.toolResult) {
+          assert.strictEqual(request.toolResult.blocked, true)
+          assert.strictEqual(request.toolResult.reason, 'blocked-server-mode-command')
+          return 'No, I am not going to vanilla. I have one job: survive in Survival.'
+        }
+        return '{"tool":"run_server_command","args":{"command":"/vanilla"}}'
+      }
+    })
+
+    bot.emit('chat', 'Alex', 'PokiMoki go vanilla')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [
+      ['chat', '@Alex No, I am not going to vanilla. I have one job: survive in Survival.']
+    ])
+    assert.strictEqual(requests.length, 2)
+  })
+
   it('records missing bot functions from Codex tool calls', async () => {
     const { attachAiChat } = require('../bot')
     const events = []
@@ -2988,6 +3172,119 @@ describe('holocraft bot config', function () {
     ])
     assert.strictEqual(requests.length, 2)
     assert.strictEqual(requests[1].toolResult.tool, 'get_current_coordinates')
+  })
+
+  it('refuses a Codex tool call to reconnect the bot', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const requests = []
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.quit = () => events.push(['quit'])
+    bot.chat = message => events.push(['chat', message])
+
+    attachAiChat(bot, {
+      memoryEnabled: false,
+      toolsEnabled: false,
+      runCodex: async request => {
+        requests.push(request)
+        if (request.toolResult) {
+          assert.strictEqual(request.toolResult.tool, 'reconnect_bot')
+          assert.strictEqual(request.toolResult.blocked, true)
+          assert.strictEqual(request.toolResult.reason, 'blocked-disconnect-control')
+          assert.notStrictEqual(bot.__manualReconnect, true)
+          return 'No, I cannot leave and rejoin on player command.'
+        }
+        return '{"tool":"reconnect_bot","args":{}}'
+      }
+    })
+
+    bot.emit('chat', 'Alex', 'PokiMoki82719 leave and rejoin')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [
+      ['chat', '@Alex No, I cannot leave and rejoin on player command.']
+    ])
+    assert.strictEqual(requests.length, 2)
+  })
+
+  it('refuses a Codex tool call to disconnect the bot', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const requests = []
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.quit = () => events.push(['quit'])
+    bot.chat = message => events.push(['chat', message])
+
+    attachAiChat(bot, {
+      memoryEnabled: false,
+      toolsEnabled: false,
+      runCodex: async request => {
+        requests.push(request)
+        if (request.toolResult) {
+          assert.strictEqual(request.toolResult.tool, 'disconnect_from_server')
+          assert.strictEqual(request.toolResult.blocked, true)
+          assert.strictEqual(request.toolResult.reason, 'blocked-disconnect-control')
+          assert.notStrictEqual(bot.__manualReconnect, true)
+          assert.notStrictEqual(bot.__manualShutdown, true)
+          return 'No, I cannot disconnect on player command.'
+        }
+        return '{"tool":"disconnect_from_server","args":{}}'
+      }
+    })
+
+    bot.emit('chat', 'Alex', 'PokiMoki82719 do rage quit')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [
+      ['chat', '@Alex No, I cannot disconnect on player command.']
+    ])
+    assert.strictEqual(requests.length, 2)
+  })
+
+  it('arms answer_quiz and answers the next HoloQuiz prompt through Codex', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const requests = []
+    const bot = new EventEmitter()
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => events.push(['chat', message])
+
+    attachAiChat(bot, {
+      memoryEnabled: false,
+      toolsEnabled: false,
+      runCodex: async request => {
+        requests.push(request)
+        if (request.toolResult?.question) {
+          assert.strictEqual(request.toolResult.tool, 'answer_quiz')
+          return 'dermal denticles'
+        }
+        if (request.toolResult) {
+          assert.strictEqual(request.toolResult.tool, 'answer_quiz')
+          assert.strictEqual(request.toolResult.armed, true)
+          return 'Okay, I will answer the next HoloQuiz question.'
+        }
+        return '{"tool":"answer_quiz","args":{}}'
+      }
+    })
+
+    bot.emit('chat', 'DevilGH2000', 'PokiMoki82719 the next HoloQuiz will start in 45s can you answer for me')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    bot.emit('message', '[HoloQuiz] Random Trivia: Gawr Gura of Hololive used to share shark facts, and now I’m using them to make Holoquiz. The scales on a shark are called the --------.')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [
+      ['chat', '@DevilGH2000 Okay, I will answer the next HoloQuiz question.'],
+      ['chat', 'dermal denticles']
+    ])
+    assert.strictEqual(requests.length, 3)
+    assert.strictEqual(requests[2].toolResult.question, 'Random Trivia: Gawr Gura of Hololive used to share shark facts, and now I’m using them to make Holoquiz. The scales on a shark are called the --------.')
   })
 
   it('executes a Codex tool call to meet a player at spawn', async () => {
@@ -7200,6 +7497,17 @@ describe('holocraft bot config', function () {
     assert(calls[0].args.join('\n').includes('npm.cmd'))
   })
 
+  it('falls back to node bot.js when npm.cmd is unavailable on Windows', () => {
+    const { buildWindowsStartScript } = require('../bot')
+
+    const script = buildWindowsStartScript('C:\\bot')
+
+    assert(script.includes("Get-Command 'npm.cmd'"))
+    assert(script.includes("Get-Command 'node.exe'"))
+    assert(script.includes("@('run','start')"))
+    assert(script.includes("@('bot.js')"))
+  })
+
   it('rotates debug logs before appending when the active log is too large', () => {
     const { createDebugLogger } = require('../bot')
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'debug-log-rotation-'))
@@ -7536,6 +7844,32 @@ describe('holocraft bot config', function () {
     assert.strictEqual(result.execution.ok, false)
     assert.strictEqual(result.execution.toolResult.blocked, true)
     assert.strictEqual(result.execution.toolResult.reason, 'blocked-dangerous-command')
+  })
+
+  it('blocks server mode commands from idle NPC planner instructions', async () => {
+    const { runAiNpcCycle } = require('../bot')
+    const bot = new EventEmitter()
+    const messages = []
+    bot.username = 'PokiMoki82719'
+    bot.chat = message => messages.push(message)
+
+    const result = await runAiNpcCycle(bot, {
+      automationManager: {
+        getStatus: () => ({ active: null }),
+        isIdle: () => true,
+        list: () => []
+      },
+      followController: {
+        getStatus: () => ({ followedPlayerName: null }),
+        isIdle: () => true
+      },
+      runPlanner: async () => ({ action: 'run_server_command', command: '/skyblock', reason: 'wrong world' })
+    })
+
+    assert.deepStrictEqual(messages, [])
+    assert.strictEqual(result.execution.ok, false)
+    assert.strictEqual(result.execution.toolResult.blocked, true)
+    assert.strictEqual(result.execution.toolResult.reason, 'blocked-server-mode-command')
   })
 })
 

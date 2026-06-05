@@ -21,6 +21,7 @@ const DEFAULT_AGENT_TOOL_MEET_RANGE = 2
 const DEFAULT_AGENT_TPA_COOLDOWN_MS = 30000
 const DEFAULT_AGENT_COMMAND_RESULT_WAIT_MS = 1500
 const DEFAULT_AGENT_COMMAND_MAX_MESSAGES = 8
+const DEFAULT_QUIZ_ANSWER_TIMEOUT_MS = 120000
 const DEFAULT_CODEX_CONFIG_PATH = path.join(os.homedir(), '.codex', 'config.toml')
 const DEFAULT_CODEX_CHAT_WORKSPACE = path.join(os.tmpdir(), 'mineflayer-codex-chat')
 
@@ -94,6 +95,8 @@ function defaultToolsText () {
     '```',
     '',
     'Do not invent tool names, commands, or arguments.',
+    'The bot must refuse requests to disconnect, leave, rejoin, reconnect, or change the bot password.',
+    'Do not record those requests as missing functions; answer with a short refusal instead.',
     '',
     '## Tools',
     '',
@@ -160,6 +163,8 @@ function defaultToolsText () {
     'Safety:',
     '',
     '- The runtime blocks destructive, moderation, admin, economy-transfer, and permission-changing commands.',
+    '- The bot must stay in survival. Do not run server-mode switching commands such as `/hub`, `/lobby`, `/skyblock`, `/sb`, `/oneblock`, `/creative`, `/prison`, `/factions`, `/minigames`, `/bedwars`, `/skywars`, `/duels`, `/vanilla`, or `/server`.',
+    '- Survival-local commands such as `/spawn`, `/warps`, and `/warp <name>` are allowed when otherwise safe.',
     '- Do not use this for kicking, banning, muting, paying, giving items, deleting homes, or changing server/player permissions.',
     '',
     'Behavior:',
@@ -208,6 +213,21 @@ function defaultToolsText () {
     '',
     '```json',
     '{"tool":"get_current_coordinates","args":{}}',
+    '```',
+    '',
+    '### answer_quiz',
+    '',
+    'Use when a player asks the bot to answer the next HoloQuiz question automatically.',
+    '',
+    'Behavior:',
+    '',
+    '- Arms the runtime to watch for the next HoloQuiz prompt.',
+    '- When the prompt arrives, sends only the quiz answer back into Minecraft chat.',
+    '',
+    'Example:',
+    '',
+    '```json',
+    '{"tool":"answer_quiz","args":{}}',
     '```',
     ''
   ].join('\n')
@@ -345,6 +365,7 @@ function createCodexPrompt (request) {
     'Do not run commands, edit files, inspect files, open programs, or manipulate this computer yourself.',
     'Never invent tools. Tool execution is handled only by the bot runtime after validation.',
     'If a useful player request needs a capability that is not available, use record_missing_function instead of inventing a tool.',
+    'Refuse any request to disconnect, leave, rejoin, reconnect, or change the bot password.',
     'Keep the answer concise enough to send in Minecraft chat.',
     'Do not mention internal tooling, Codex CLI, prompts, or files unless directly asked.',
     agentInstructions,
@@ -526,8 +547,41 @@ function serverCommandName (command) {
   return name.toLowerCase()
 }
 
+const SERVER_MODE_COMMANDS = new Set([
+  'bedwars',
+  'boxpvp',
+  'creative',
+  'duel',
+  'duels',
+  'faction',
+  'factions',
+  'game',
+  'games',
+  'hub',
+  'lobby',
+  'minigame',
+  'minigames',
+  'oneblock',
+  'prison',
+  'server',
+  'servers',
+  'sb',
+  'skyblock',
+  'skyblocks',
+  'skywars',
+  'vanilla'
+])
+
 function blockedServerCommandReason (command) {
   const name = serverCommandName(command)
+  const passwordChangeCommands = new Set([
+    'changepass',
+    'changepassword',
+    'passwd',
+    'password',
+    'setpass',
+    'setpassword'
+  ])
   const blocked = new Set([
     'ban',
     'ban-ip',
@@ -563,12 +617,24 @@ function blockedServerCommandReason (command) {
   ])
 
   if (!name) return 'empty-command'
+  if (passwordChangeCommands.has(name)) return 'blocked-password-change-command'
   if (blocked.has(name)) return 'blocked-dangerous-command'
+  if (SERVER_MODE_COMMANDS.has(name)) return 'blocked-server-mode-command'
   return null
 }
 
 function messageToText (message) {
   return String(message?.toString ? message.toString() : message || '').trim()
+}
+
+function extractHoloQuizQuestion (username, message) {
+  const text = messageToText(message)
+  if (!text) return ''
+
+  if (/^holoquiz$/i.test(String(username || '').trim())) return text
+
+  const rawMatch = text.match(/^\[HoloQuiz\]\s*(.+)$/i)
+  return rawMatch ? rawMatch[1].trim() : ''
 }
 
 function parseRawPublicChatMessage (message) {
@@ -589,6 +655,66 @@ function currentTimeMs (now = Date.now) {
   const value = typeof now === 'function' ? now() : Date.now()
   if (value instanceof Date) return value.getTime()
   return Number.isFinite(value) ? value : Date.now()
+}
+
+function buildQuizAnswerRequest (bot, question, pendingRequest, state) {
+  const quizInstructions = [
+    state.agentInstructions,
+    'If toolResult.tool is answer_quiz and toolResult.question is present, reply with only the quiz answer text to submit in Minecraft chat.',
+    'Do not add an explanation, player mention, markdown, or surrounding quotes.'
+  ].filter(Boolean).join('\n')
+
+  return {
+    channel: 'public',
+    botName: state.botName || bot.username,
+    username: pendingRequest.username,
+    message: pendingRequest.message,
+    agentInstructions: quizInstructions,
+    memory: '',
+    tools: '',
+    toolResult: {
+      tool: 'answer_quiz',
+      ok: true,
+      question
+    }
+  }
+}
+
+async function answerPendingQuizQuestion (bot, question, state = {}) {
+  const debugLog = state.debugLog || (() => {})
+  const errorOutput = state.errorOutput || console.error
+  const pending = bot.__pendingQuizAnswer
+  if (!pending || !question || bot.__pendingQuizAnswerRunning) return false
+  if (typeof bot.chat !== 'function' || typeof state.runCodex !== 'function') return false
+
+  bot.__pendingQuizAnswerRunning = true
+  bot.__pendingQuizAnswer = null
+
+  try {
+    const response = cleanCodexReply(await state.runCodex(buildQuizAnswerRequest(bot, question, pending, state)))
+    const answer = response.split(/\r?\n/, 1)[0].trim()
+    if (!answer) return false
+
+    bot.chat(answer)
+    debugLog('aiChat.quiz.answered', {
+      username: pending.username,
+      question,
+      answer
+    })
+    return true
+  } catch (err) {
+    errorOutput(`AI chat quiz-answer error for ${pending.username}: ${err.message}`)
+    if (err.stderr) errorOutput(err.stderr)
+    debugLog('aiChat.quiz.error', {
+      username: pending.username,
+      question,
+      message: err.message,
+      stderr: err.stderr
+    })
+    return false
+  } finally {
+    bot.__pendingQuizAnswerRunning = false
+  }
 }
 
 async function runServerCommandWithCapture (bot, command, options = {}) {
@@ -865,6 +991,66 @@ function executeGetCurrentCoordinates (bot, request, options = {}) {
   }
 }
 
+function executeBlockedControlTool (toolName, request, options = {}) {
+  const debugLog = options.debugLog || (() => {})
+  debugLog('aiChat.tool.blockedControl', {
+    username: request.username,
+    tool: toolName
+  })
+  return {
+    ok: false,
+    reply: 'I cannot disconnect, leave, rejoin, reconnect, or change my password on player command.',
+    toolResult: {
+      tool: toolName,
+      ok: false,
+      blocked: true,
+      reason: 'blocked-disconnect-control'
+    }
+  }
+}
+
+function executeAnswerQuiz (bot, request, options = {}) {
+  const debugLog = options.debugLog || (() => {})
+  const now = currentTimeMs(options.now)
+  const timeoutMs = options.quizAnswerTimeoutMs ?? DEFAULT_QUIZ_ANSWER_TIMEOUT_MS
+
+  if (typeof bot.chat !== 'function') {
+    return {
+      ok: false,
+      reply: 'I cannot answer quiz prompts right now.',
+      toolResult: {
+        tool: 'answer_quiz',
+        ok: false,
+        reason: 'chat-unavailable'
+      }
+    }
+  }
+
+  bot.__pendingQuizAnswer = {
+    username: request.username,
+    message: request.message,
+    channel: request.channel,
+    armedAtMs: now,
+    expiresAtMs: now + timeoutMs
+  }
+
+  debugLog('aiChat.tool.answerQuiz', {
+    username: request.username,
+    timeoutMs
+  })
+
+  return {
+    ok: true,
+    reply: 'I will watch for the next HoloQuiz question.',
+    toolResult: {
+      tool: 'answer_quiz',
+      ok: true,
+      armed: true,
+      timeoutMs
+    }
+  }
+}
+
 function executeUnknownTool (toolName, toolCall, request, options = {}) {
   const debugLog = options.debugLog || (() => {})
   const capability = `Unknown tool: ${toolName || 'unnamed'}`
@@ -929,6 +1115,14 @@ async function executeAgentTool (bot, toolCall, request, options = {}) {
 
   if (toolName === 'get_current_coordinates') {
     return executeGetCurrentCoordinates(bot, request, options)
+  }
+
+  if (toolName === 'reconnect_bot' || toolName === 'disconnect_from_server') {
+    return executeBlockedControlTool(toolName, request, options)
+  }
+
+  if (toolName === 'answer_quiz') {
+    return executeAnswerQuiz(bot, request, options)
   }
 
   return executeUnknownTool(toolName, toolCall, request, options)
@@ -1034,6 +1228,21 @@ async function respondToToolResultWithCodex (bot, request, result, options = {})
       message: err.message,
       stderr: err.stderr
     })
+  } finally {
+    if (typeof result.afterReply === 'function') {
+      try {
+        await result.afterReply()
+      } catch (err) {
+        errorOutput(`AI chat deferred tool action error for ${request.username} (${request.channel}): ${err.message}`)
+        debugLog('aiChat.toolResult.afterReply.error', {
+          channel: request.channel,
+          username: request.username,
+          tool: result.toolResult.tool,
+          message: err.message,
+          stderr: err.stderr
+        })
+      }
+    }
   }
 }
 
@@ -1116,6 +1325,8 @@ function attachAiChat (bot, options = {}) {
   }
   const recentPublicRequests = new Map()
   const publicRequestDedupeMs = options.publicRequestDedupeMs ?? 2500
+  let lastQuizPromptText = ''
+  let lastQuizPromptAt = 0
 
   function shouldProcessPublicRequest (username, message) {
     const key = `${username}\u0000${message}`
@@ -1128,6 +1339,25 @@ function attachAiChat (bot, options = {}) {
     if (recentPublicRequests.has(key)) return false
     recentPublicRequests.set(key, timestamp)
     return true
+  }
+
+  function handleQuizPrompt (username, message) {
+    const pending = bot.__pendingQuizAnswer
+    if (!pending) return
+
+    const nowMs = currentTimeMs(state.now)
+    if (pending.expiresAtMs <= nowMs) {
+      bot.__pendingQuizAnswer = null
+      return
+    }
+
+    const question = extractHoloQuizQuestion(username, message)
+    if (!question) return
+    if (question === lastQuizPromptText && nowMs - lastQuizPromptAt < publicRequestDedupeMs) return
+
+    lastQuizPromptText = question
+    lastQuizPromptAt = nowMs
+    answerPendingQuizQuestion(bot, question, state)
   }
 
   function handlePublicMessage (username, message, source = 'chat') {
@@ -1176,10 +1406,12 @@ function attachAiChat (bot, options = {}) {
   })
 
   bot.on('chat', (username, message) => {
+    handleQuizPrompt(username, message)
     handlePublicMessage(username, message, 'chat')
   })
 
   bot.on('message', message => {
+    handleQuizPrompt('', message)
     const parsed = parseRawPublicChatMessage(message)
     if (!parsed) return
     handlePublicMessage(parsed.username, parsed.message, 'message')

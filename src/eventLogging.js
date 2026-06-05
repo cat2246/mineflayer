@@ -183,6 +183,14 @@ function attachEventLogging (bot, options = {}) {
     }
 
     await enablePhysicsAfterDelay(bot, wait, debugLog, spawnCount)
+    try {
+      await joinWorld(bot)
+      console.log('Sent /survival command')
+      debugLog('command.sent', { command: '/survival', reason: 'spawn-recovery' })
+    } catch (err) {
+      console.log('Could not return to Survival world:', err.message)
+      debugLog('command.error', { command: '/survival', reason: 'spawn-recovery', error: err.message })
+    }
   })
 
   bot.on('windowOpen', (window) => {

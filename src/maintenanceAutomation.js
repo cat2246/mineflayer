@@ -143,6 +143,22 @@ function appendMaintenanceLog (message, options = {}) {
   fileSystem.appendFileSync(logPath, `${new Date().toISOString()} ${message}\n`)
 }
 
+function buildWindowsStartScript (cwd) {
+  const escapePowerShell = value => String(value).replace(/'/g, "''")
+  const safeCwd = escapePowerShell(cwd)
+
+  return [
+    `$npmCommand = (Get-Command 'npm.cmd' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)`,
+    'if ($npmCommand) {',
+    `  $process = Start-Process -FilePath $npmCommand -ArgumentList @('run','start') -WorkingDirectory '${safeCwd}' -WindowStyle Hidden -PassThru`,
+    '} else {',
+    `  $nodeCommand = (Get-Command 'node.exe' -ErrorAction Stop | Select-Object -First 1 -ExpandProperty Source)`,
+    `  $process = Start-Process -FilePath $nodeCommand -ArgumentList @('bot.js') -WorkingDirectory '${safeCwd}' -WindowStyle Hidden -PassThru`,
+    '}',
+    '$process.Id'
+  ].join('\n')
+}
+
 async function startBotProcess (options = {}) {
   const spawn = options.spawn || require('child_process').spawn
   const platform = options.platform || process.platform
@@ -152,12 +168,8 @@ async function startBotProcess (options = {}) {
   if (typeof fileSystem.mkdirSync === 'function') fileSystem.mkdirSync(path.dirname(logPath), { recursive: true })
 
   if (platform === 'win32') {
-    const escapePowerShell = value => String(value).replace(/'/g, "''")
     const errorLogPath = `${logPath}.err`
-    const script = [
-      `$process = Start-Process -FilePath 'npm.cmd' -ArgumentList @('run','start') -WorkingDirectory '${escapePowerShell(cwd)}' -WindowStyle Hidden -PassThru`,
-      '$process.Id'
-    ].join('\n')
+    const script = buildWindowsStartScript(cwd)
     const result = await runProcess('powershell.exe', ['-NoProfile', '-Command', script], options)
     const pid = Number.parseInt(result.stdout, 10)
     return { pid: Number.isFinite(pid) ? pid : null, logPath, errorLogPath }
@@ -266,6 +278,7 @@ function attachMaintenanceAutomation (options = {}) {
 
 module.exports = {
   attachMaintenanceAutomation,
+  buildWindowsStartScript,
   buildCodexFixArgs,
   buildMaintenancePrompt,
   hasMaintenanceWork,

@@ -32,14 +32,16 @@ Feature backlog captured by the Minecraft AI NPC when players ask for abilities 
 }
 ```
 
+- Resolved: Added `get_current_coordinates` to the checked-in tool list so Codex can call the existing runtime handler consistently.
+
 <!-- missing-function:4f1b707b43302f56 -->
 ## 2026-06-02T16:16:09.379Z - leave and rejoin server
 
 - Requested by: `JaggedFireFang` via `public`
 - Source: `ai-chat`
-- Reason: Player asked the bot to disconnect from the server and reconnect, but no available runtime tool can do that yet.
-- Suggested tool/function: `reconnect_server`
+- Reason: Player asked the bot to disconnect from the server and reconnect.
 - Player message: PokiMoki82719 leave and rejoin
+- Blocked: Player-commanded disconnect/rejoin requests are not allowed. The bot must refuse instead of treating this as a missing function.
 
 <!-- missing-function:718274c6af5cf0f1 -->
 ## 2026-06-02T16:16:40.283Z - leave and rejoin server
@@ -47,14 +49,44 @@ Feature backlog captured by the Minecraft AI NPC when players ask for abilities 
 - Requested by: `JaggedFireFang` via `public`
 - Source: `ai-chat`
 - Reason: Player asked the bot to disconnect from the server and reconnect.
-- Suggested tool/function: `reconnect_bot`
 - Player message: PokiMoki82719 leave and rejoin
+- Blocked: Player-commanded disconnect/rejoin requests are not allowed. The bot must refuse instead of treating this as a missing function.
 
 <!-- missing-function:57eb2ac0ff1f6689 -->
 ## 2026-06-02T16:17:36.371Z - leave and rejoin server
 
 - Requested by: `Archie` via `public`
 - Source: `ai-chat`
-- Reason: Player asked the bot to rage quit, but there is no available tool to disconnect from the server.
-- Suggested tool/function: `disconnect_from_server`
+- Reason: Player asked the bot to rage quit.
 - Player message: PokiMoki82719 do rage quit
+- Blocked: Player-commanded disconnect requests are not allowed. The bot must refuse instead of treating this as a missing function.
+
+<!-- missing-function:5ad59fbe39cd6055 -->
+## 2026-06-02T16:42:59.524Z - answer Holoquiz questions automatically
+
+- Requested by: `DevilGH2000` via `public`
+- Source: `ai-chat`
+- Reason: Player asked the bot to answer an upcoming Holoquiz for them, but no tool exists to read quiz prompts and respond in chat.
+- Suggested tool/function: `answer_quiz`
+- Player message: PokiMoki82719 the next Holoquiz will start in 45s can you answer for me
+- Resolved: Added the `answer_quiz` runtime tool to arm the next HoloQuiz prompt and submit the answer through Codex.
+
+<!-- missing-function:aaa864deddea8456 -->
+## 2026-06-02T16:44:10.312Z - pay another player money
+
+- Requested by: `Archie` via `public`
+- Source: `ai-chat`
+- Reason: Player asked the bot to send 1 to itzmugdhoboy with /pay, but available tools do not allow economy-transfer commands.
+- Suggested tool/function: `pay_player`
+- Player message: PokiMoki82719 do /pay itzmugdhoboy 1
+- Resolved: Kept economy-transfer commands blocked and added regression coverage so `/pay` requests are refused consistently instead of being treated as a missing capability.
+
+<!-- missing-function:42ba8ab814d167eb -->
+## 2026-06-02T17:19:38.709Z - switch to hub server
+
+- Requested by: `Archie` via `public`
+- Source: `ai-chat`
+- Reason: Player asked the bot to run /hub, but server-mode switching commands are not allowed by the current runtime.
+- Suggested tool/function: `switch_server_mode`
+- Player message: PokiMoki82719 do /hub
+- Resolved: Kept server-mode switching blocked so the bot stays in survival, and added regression coverage for `/hub`-style requests.

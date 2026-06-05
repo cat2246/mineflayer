@@ -50,6 +50,7 @@ function attachShutdownHandlers (bot, signals = ['SIGINT', 'SIGTERM']) {
   function shutdown () {
     if (shuttingDown) return
     shuttingDown = true
+    bot.__manualReconnect = false
     bot.__manualShutdown = true
     closeViewer(bot)
     bot.quit()
@@ -68,6 +69,13 @@ function attachReconnectHandler (bot, options = {}) {
   let scheduled = false
 
   bot.once('end', () => {
+    if (bot.__manualReconnect) {
+      bot.__manualReconnect = false
+      debugLog('bot.reconnect.immediate', { reason: 'manual-reconnect' })
+      if (typeof reconnect === 'function') reconnect()
+      return
+    }
+
     if (bot.__manualShutdown) {
       debugLog('bot.reconnect.skipped', { reason: 'manual-shutdown' })
       return
