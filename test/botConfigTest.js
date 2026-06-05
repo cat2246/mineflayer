@@ -7909,8 +7909,8 @@ describe('holocraft bot config', function () {
     assert(entries.some(entry => entry.event === 'homes.detected'))
   })
 
-  it('schedules the idle NPC planner every five minutes', () => {
-    const { attachAiNpc, AI_NPC_IDLE_INTERVAL_MS } = require('../bot')
+  it('does not schedule the idle NPC planner automatically', () => {
+    const { attachAiNpc } = require('../bot')
     const bot = new EventEmitter()
     const timers = []
     const cleared = []
@@ -7934,13 +7934,11 @@ describe('holocraft bot config', function () {
       }
     })
 
-    assert.strictEqual(timers.length, 1)
-    assert.strictEqual(timers[0].delayMs, AI_NPC_IDLE_INTERVAL_MS)
-    assert.strictEqual(timers[0].unrefCalled, true)
+    assert.strictEqual(timers.length, 0)
     assert.strictEqual(typeof controller.runNow, 'function')
 
     controller.stop()
-    assert.deepStrictEqual(cleared, [timers[0]])
+    assert.deepStrictEqual(cleared, [])
   })
 
   it('asks Codex for an idle NPC plan and starts the selected automation', async () => {

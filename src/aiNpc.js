@@ -1,6 +1,5 @@
 const fs = require('fs')
 const { spawn } = require('child_process')
-const { AI_NPC_IDLE_INTERVAL_MS } = require('./config')
 const {
   buildCodexCliArgs,
   buildCodexOptions,
@@ -400,11 +399,6 @@ async function runAiNpcCycle (bot, options = {}) {
 }
 
 function attachAiNpc (bot, options = {}) {
-  const setPlannerInterval = options.setInterval || setInterval
-  const clearPlannerInterval = options.clearInterval || clearInterval
-  const errorOutput = options.errorOutput || console.error
-  const debugLog = options.debugLog || (() => {})
-  const intervalMs = options.idleIntervalMs ?? AI_NPC_IDLE_INTERVAL_MS
   const state = {
     ...options,
     runPlanner: options.runPlanner || createAiNpcPlannerRunner({
@@ -427,20 +421,9 @@ function attachAiNpc (bot, options = {}) {
     }
   }
 
-  const timer = setPlannerInterval(() => {
-    runNow().catch(err => {
-      errorOutput(`AI NPC planner error: ${err.message}`)
-      if (err.stderr) errorOutput(err.stderr)
-      debugLog('aiNpc.error', { message: err.message, stderr: err.stderr })
-    })
-  }, intervalMs)
-
-  if (typeof timer?.unref === 'function') timer.unref()
-
   function stop () {
     if (stopped) return
     stopped = true
-    clearPlannerInterval(timer)
   }
 
   bot.once?.('end', stop)
