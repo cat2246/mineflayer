@@ -22,6 +22,7 @@ module.exports = {
   ...require('./maintenanceAutomation'),
   ...require('./mining'),
   ...require('./nightSafety'),
+  ...require('./npcLife'),
   ...require('./places'),
   ...require('./profileStore'),
   ...require('./pyroFarming'),

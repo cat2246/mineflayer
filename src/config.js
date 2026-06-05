@@ -34,6 +34,7 @@ const CONTAINER_INTERACTION_DELAY_MAX_MS = 3000
 const CONTAINER_MEMORY_PATH = path.join(__dirname, '..', 'logs', 'container-memory.txt')
 const PYROFARM_MEMORY_PATH = path.join(__dirname, '..', 'logs', 'pyrofarm-memory.txt')
 const PLACE_COORDINATES_PATH = path.join(__dirname, '..', 'logs', 'places.txt')
+const NPC_LIFE_PATH = path.join(__dirname, '..', 'data', 'npc-life.json')
 const ERROR_REVIEW_PATH = path.join(__dirname, '..', 'logs', 'error-review.md')
 const MISSING_FUNCTIONS_PATH = path.join(__dirname, '..', 'MISSING_FUNCTIONS.md')
 const MAINTENANCE_LOG_PATH = path.join(__dirname, '..', 'logs', 'maintenance.log')
@@ -138,6 +139,7 @@ module.exports = {
   BOT_RUNTIME_LOG_PATH,
   MAINTENANCE_LOG_PATH,
   MISSING_FUNCTIONS_PATH,
+  NPC_LIFE_PATH,
   PYROFARM_MEMORY_PATH,
   PLACE_COORDINATES_PATH,
   FOLLOW_CHEST_SEARCH_RADIUS,

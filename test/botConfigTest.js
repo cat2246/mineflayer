@@ -23,6 +23,39 @@ describe('holocraft bot config', function () {
     })
   })
 
+  it('creates default NPC life state when no local file exists', () => {
+    const { readNpcLife, NPC_LIFE_VERSION } = require('../bot')
+    const lifePath = tempNpcLifePath()
+
+    const life = readNpcLife({ npcLifePath: lifePath, now: () => 1000 })
+
+    assert.strictEqual(life.version, NPC_LIFE_VERSION)
+    assert.strictEqual(life.currentLifestyle, 'survivalist')
+    assert.strictEqual(life.currentGoal.id, 'survive-and-settle')
+    assert.deepStrictEqual(life.recentEvents, [])
+  })
+
+  it('normalizes malformed NPC life state safely', () => {
+    const { normalizeNpcLife } = require('../bot')
+
+    const life = normalizeNpcLife({
+      traits: { curious: 500, cautious: -10 },
+      lifestyles: { homesteader: 120, explorer: -5 },
+      currentLifestyle: 'unknown',
+      currentGoal: { id: '' },
+      recentEvents: 'bad',
+      lifeStory: [123, 'I built a fence.']
+    }, { now: () => 2000 })
+
+    assert.strictEqual(life.traits.curious, 100)
+    assert.strictEqual(life.traits.cautious, 0)
+    assert.strictEqual(life.lifestyles.homesteader, 100)
+    assert.strictEqual(life.lifestyles.explorer, 0)
+    assert.strictEqual(life.currentLifestyle, 'survivalist')
+    assert.strictEqual(life.currentGoal.id, 'survive-and-settle')
+    assert.deepStrictEqual(life.lifeStory, ['I built a fence.'])
+  })
+
   it('profile store creates offline and online bot profiles locally', () => {
     const { createProfileStore } = require('../bot')
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-profiles-'))
@@ -8283,6 +8316,10 @@ function tempPyroFarmMemoryPath () {
 
 function tempPlacesPath () {
   return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'places-')), 'places.txt')
+}
+
+function tempNpcLifePath () {
+  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'npc-life-')), 'npc-life.json')
 }
 
 function tempMemoryPath () {
