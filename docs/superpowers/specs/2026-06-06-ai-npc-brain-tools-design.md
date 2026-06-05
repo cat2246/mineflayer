@@ -12,17 +12,22 @@ This replaces `/automation` as the primary behavior path. Existing automation mo
 flowchart TD
   A["Bot joins server"] --> B["Load bot-specific memory"]
   B --> C["Go to survival world"]
-  C --> D["Run /rtp"]
-  D --> E["Find safe landing context"]
-  E --> F["Optionally run /sethome home"]
-  F --> G["Observe compact state"]
-  G --> H["Think scheduler decides whether Codex should run"]
-  H --> I["Codex chooses one tool call or a short plan"]
-  I --> J["Validate tool call"]
-  J --> K["Execute Mineflayer tool"]
-  K --> L["Persist result and memory"]
-  L --> G
+  C --> D{"Has remembered home?"}
+  D -->|"yes"| E["Return to or verify home"]
+  D -->|"no"| F["Run /rtp to begin journey"]
+  F --> G["Find safe landing context"]
+  G --> H["Run /sethome home when safe"]
+  E --> I["Observe compact state"]
+  H --> I
+  I --> J["Think scheduler decides whether Codex should run"]
+  J --> K["Codex chooses one tool call or a short plan"]
+  K --> L["Validate tool call"]
+  L --> M["Execute Mineflayer tool"]
+  M --> N["Persist result and memory"]
+  N --> I
 ```
+
+`/rtp` is only a fresh-life bootstrap action. Once the bot has a remembered and verified home, home becomes the anchor of the NPC's life. The bot should return to home for storage, rest, safety, crafting, cooking, project continuation, and reflection.
 
 ## Thinking Strategy
 
@@ -295,6 +300,8 @@ data/bots/<bot-id>/
   crafting.json
   building.json
   cooking.json
+  memory-summary.json
+  event-log.jsonl
   daily-journal.md
   debug.log
 ```
@@ -309,17 +316,98 @@ Memory rules:
 - Deep reflection compresses recent events every 30 real minutes.
 - Memory write failures are advisory; the bot should continue.
 
+### Home Memory
+
+Home is first-class memory, not just a command shortcut.
+
+The bot should store:
+
+- home name, normally `home`
+- dimension
+- approximate position if known
+- when it was set or last verified
+- nearby useful blocks
+- remembered containers at home
+- active home projects
+- safety notes such as lighting, doors, bed, food supply, and furnace availability
+
+Startup behavior depends on this memory:
+
+- If home memory exists and is recent enough, do not run `/rtp`.
+- If home memory exists but has not been verified this session, use `/home home` or another safe verification path.
+- If home verification fails, mark home as uncertain and ask Codex whether to retry, search, or start a new journey.
+- If no home exists, use `/rtp`, find a safe place, and run `/sethome home`.
+
+### Memory Layers
+
+Memory should be layered so token usage stays bounded:
+
+1. **Working memory:** The last few tool results and immediate state changes. This is small and can be included in the next prompt.
+2. **Recent event log:** Append-only JSONL records such as tool calls, discoveries, danger, item storage, crafting, and player interactions.
+3. **Structured long-term memory:** Compact JSON files for places, containers, players, projects, crafting, building, cooking, and NPC life.
+4. **Summary memory:** A compact, model-readable summary of what matters now.
+5. **Journal:** Human-readable reflections every 30 real minutes.
+
+Only working memory, relevant structured records, and the current summary should go into normal Codex prompts.
+
+### Memory Compression
+
+Memory compression runs during deep reflection every 30 real minutes and may also run when event logs exceed size limits.
+
+The compression job should:
+
+- read recent events since the last compression
+- group events by topic: home, inventory, players, places, projects, danger, tools
+- update structured memory files
+- update `memory-summary.json`
+- append a short entry to `daily-journal.md`
+- mark compressed event offsets so old raw events do not need to be sent again
+
+Prompt memory should have hard budgets:
+
+- current state: small snapshot only
+- working memory: last 3 to 8 important events
+- summary memory: short bullet summary
+- structured records: only records relevant to the current goal
+- raw event log: never sent wholesale
+
+Example `memory-summary.json`:
+
+```json
+{
+  "updatedAt": 1765000000000,
+  "identity": "A cautious homesteader trying to build a safe forest home.",
+  "home": "Home is set in a forest. It has one chest, a crafting table, and needs more lighting.",
+  "currentProjects": [
+    "Improve shelter",
+    "Build food supply"
+  ],
+  "knownRisks": [
+    "Night near home is unsafe because lighting is incomplete."
+  ],
+  "recentImportantEvents": [
+    "Set home after /rtp.",
+    "Stored oak logs in home chest.",
+    "Started shelter project."
+  ]
+}
+```
+
+This summary is what Codex usually sees. The raw journal and event log are for compression and debugging, not normal thinking.
+
 ## Startup Behavior
 
 On first spawn:
 
 1. Load per-bot memory.
 2. Enter survival world.
-3. Run `/rtp`.
-4. Observe landing area.
-5. If safe and no home exists, run `/sethome home`.
-6. Trigger an urgent/event thought with reason `spawn_wilderness_start`.
-7. Codex chooses the first tool call for survival setup.
+3. Check home memory.
+4. If home exists, verify or return to home and skip `/rtp`.
+5. If no home exists, run `/rtp`.
+6. After `/rtp`, observe landing area.
+7. If safe and no home exists, run `/sethome home`.
+8. Trigger an urgent/event thought with reason `spawn_home_verified` or `spawn_wilderness_start`.
+9. Codex chooses the first tool call for the current context.
 
 Expected first goals:
 
@@ -348,7 +436,7 @@ Build the new architecture in a narrow, testable slice:
 
 - per-bot memory path resolver
 - think scheduler with event, continuation, idle, reflection triggers
-- startup wilderness flow: survival, `/rtp`, optional `/sethome home`
+- startup home/wilderness flow: survival, verify existing home or use `/rtp` only when no home exists, then `/sethome home`
 - Codex brain prompt for one tool call
 - tool registry and validator
 - initial tools:
@@ -373,10 +461,12 @@ Build the new architecture in a narrow, testable slice:
 ## Acceptance Criteria
 
 - Bot no longer requires `/automation` for AI NPC behavior.
-- Bot joins, enters survival, runs `/rtp`, and can set home through a safe tool.
+- Bot joins, enters survival, verifies existing home when available, and only runs `/rtp` when no home exists.
+- Bot can set `/sethome home` through a safe tool after a fresh wilderness start.
 - Codex is called through a scheduler that prefers major events and tool continuation over frequent idle thinking.
 - Idle thinking is rate-limited.
 - Deep reflection runs every 30 real minutes.
+- Memory compression prevents prompt growth by sending summaries and relevant records instead of full history.
 - Tool calls are allowlisted and validated.
 - Each bot reads/writes its own memory files.
 - Existing random five-minute automation behavior does not return.
