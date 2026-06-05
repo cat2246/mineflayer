@@ -8075,6 +8075,55 @@ describe('holocraft bot config', function () {
     assert.deepStrictEqual(cleared, [])
   })
 
+  it('includes NPC life state in AI NPC state snapshots', () => {
+    const { createAiNpcState, emptyNpcLife } = require('../bot')
+    const bot = new EventEmitter()
+    bot.username = 'TestBot123'
+    bot.entity = { position: combatPosition(0, 64, 0) }
+    bot.inventory = { items: () => [] }
+    bot.players = {}
+
+    const state = createAiNpcState(bot, {
+      npcLife: {
+        read: () => ({
+          ...emptyNpcLife({ now: () => 1000 }),
+          currentLifestyle: 'homesteader'
+        })
+      },
+      now: () => 1000
+    })
+
+    assert.strictEqual(state.life.currentLifestyle, 'homesteader')
+    assert.strictEqual(state.life.currentGoal.id, 'survive-and-settle')
+  })
+
+  it('guides the AI NPC prompt with lifestyle and current goal', () => {
+    const { createAiNpcPrompt, emptyNpcLife } = require('../bot')
+    const state = {
+      bot: { username: 'TestBot123' },
+      automations: [{ name: 'Farming' }],
+      players: [],
+      life: {
+        ...emptyNpcLife({ now: () => 1000 }),
+        currentLifestyle: 'homesteader',
+        currentGoal: {
+          id: 'improve-home-routine',
+          title: 'Improve the home routine',
+          reason: 'The NPC keeps returning to farming and storage.',
+          priority: 'progress',
+          selectedAt: 1000,
+          suggestedAutomations: ['Farming']
+        }
+      }
+    }
+
+    const prompt = createAiNpcPrompt(state)
+
+    assert(prompt.includes('own life'))
+    assert(prompt.includes('current lifestyle and goal'))
+    assert(prompt.includes('improve-home-routine'))
+  })
+
   it('asks Codex for an idle NPC plan and starts the selected automation', async () => {
     const { runAiNpcCycle } = require('../bot')
     const bot = new EventEmitter()

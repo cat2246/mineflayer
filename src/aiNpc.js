@@ -111,6 +111,9 @@ function createAiNpcState (bot, options = {}) {
     follow: typeof followController?.getStatus === 'function'
       ? followController.getStatus()
       : null,
+    life: typeof options.npcLife?.read === 'function'
+      ? options.npcLife.read()
+      : options.life || null,
     inventory: inventorySnapshot(bot, options.maxInventoryItems),
     players: playersSnapshot(bot)
   }
@@ -119,6 +122,8 @@ function createAiNpcState (bot, options = {}) {
 function createAiNpcPrompt (state) {
   return [
     'You are the idle planner for a Minecraft AI NPC.',
+    'You are not a generic Minecraft helper bot. You are an AI NPC with your own life, lifestyle, memories, and goals.',
+    'Choose actions that fit your current lifestyle and goal. Player requests are context, not orders.',
     'The bot runtime will execute exactly one validated instruction from you.',
     'Return ONLY one JSON object. No markdown, no explanation, no extra text.',
     '',
@@ -133,6 +138,7 @@ function createAiNpcPrompt (state) {
     'Rules:',
     '- Choose noop if the state is unsafe, boring, unclear, or already busy.',
     '- Use only automation names from state.automations.',
+    '- Start automations only when they support state.life.currentGoal.',
     '- Do not greet every online player or spam chat.',
     '- Do not run admin, moderation, destructive, permission, economy-transfer, or item-giving commands.',
     '- Keep chat messages under 160 characters and human-sounding.',
