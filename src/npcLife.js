@@ -79,7 +79,7 @@ function emptyNpcLife (options = {}) {
   }
 }
 
-function normalizeGoal (goal, fallback) {
+function normalizeGoal (goal, fallback = defaultGoal()) {
   if (!goal || typeof goal !== 'object' || !cleanOptionalString(goal.id, 80)) return fallback
 
   return {
@@ -95,6 +95,45 @@ function normalizeGoal (goal, fallback) {
         .filter(automation => typeof automation === 'string' && automation.trim())
         .map(automation => automation.trim().slice(0, 80))
       : fallback.suggestedAutomations
+  }
+}
+
+function applyScoreDelta (scores, deltas) {
+  const next = { ...scores }
+  for (const [key, delta] of Object.entries(deltas || {})) {
+    if (Object.prototype.hasOwnProperty.call(next, key)) next[key] = clampScore(next[key] + delta)
+  }
+  return next
+}
+
+function eventDeltas (event) {
+  if (event.type === 'automation_started') {
+    const automation = String(event.automation || '').toLowerCase()
+    if (automation === 'farming' || automation === 'wood cutting') return { lifestyles: { homesteader: 5 }, traits: { ambitious: 1 } }
+    if (automation === 'mining') return { lifestyles: { miner: 5 }, traits: { ambitious: 1 } }
+    if (automation === 'wild roaming') return { lifestyles: { explorer: 5 }, traits: { curious: 2 } }
+    if (automation === 'pyro farming') return { lifestyles: { homesteader: 3 }, traits: { ambitious: 2 } }
+  }
+  if (event.type === 'follow_started' || event.type === 'player_nearby') return { lifestyles: { protector: 1 }, traits: { social: 3 } }
+  if (event.type === 'night' || event.type === 'low_food' || event.type === 'unsafe') return { lifestyles: { survivalist: 3 }, traits: { cautious: 3 } }
+  if (event.type === 'planner_noop') return { traits: { cautious: 1 } }
+  return {}
+}
+
+function updateLifestyleTransition (life) {
+  const entries = Object.entries(life.lifestyles).sort((a, b) => b[1] - a[1])
+  const [candidate, candidateScore] = entries[0]
+  const currentScore = life.lifestyles[life.currentLifestyle] || 0
+  if (candidate === life.currentLifestyle || candidateScore < currentScore + 10) return life
+
+  return {
+    ...life,
+    previousLifestyle: life.currentLifestyle,
+    currentLifestyle: candidate,
+    lifeStory: [
+      ...life.lifeStory,
+      `I started living more like a ${candidate} after repeated experiences shaped my routine.`
+    ].slice(-MAX_LIFE_STORY)
   }
 }
 
@@ -134,6 +173,135 @@ function normalizeNpcLife (life, options = {}) {
       ? life.updatedAt
       : base.updatedAt
   }
+}
+
+function normalizeRecentEvent (event, now) {
+  const input = event && typeof event === 'object' && !Array.isArray(event) ? event : {}
+  return {
+    type: cleanString(input.type, 'unknown', 80),
+    at: typeof input.at === 'number' && Number.isFinite(input.at) ? input.at : now
+  }
+}
+
+function applyNpcLifeEvent (life, event, options = {}) {
+  const now = options.now ? options.now() : Date.now()
+  const current = normalizeNpcLife(life, options)
+  const deltas = eventDeltas(event || {})
+  const nextLife = updateLifestyleTransition({
+    ...current,
+    traits: applyScoreDelta(current.traits, deltas.traits),
+    lifestyles: applyScoreDelta(current.lifestyles, deltas.lifestyles),
+    recentEvents: [
+      ...current.recentEvents,
+      normalizeRecentEvent(event, now)
+    ].slice(-MAX_RECENT_EVENTS),
+    updatedAt: now
+  })
+  return normalizeNpcLife(nextLife, options)
+}
+
+function goalFor (id, title, reason, priority, suggestedAutomations, now) {
+  return normalizeGoal({
+    id,
+    title,
+    reason,
+    priority,
+    selectedAt: now,
+    suggestedAutomations
+  })
+}
+
+function chooseNpcGoal (life, context = {}, options = {}) {
+  const now = options.now ? options.now() : Date.now()
+  const current = normalizeNpcLife(life, options)
+
+  if (context.unsafe || context.isNight) {
+    return goalFor(
+      'stay-safe-until-morning',
+      'Stay safe until morning',
+      'The world is dangerous right now, so safety comes first.',
+      'safety',
+      [],
+      now
+    )
+  }
+
+  if (typeof context.food === 'number' && context.food < 12) {
+    return goalFor(
+      'secure-food',
+      'Secure food',
+      'Food is running low, so the NPC should rebuild a reliable supply.',
+      'survival',
+      ['Farming'],
+      now
+    )
+  }
+
+  if (current.currentLifestyle === 'homesteader') {
+    return goalFor(
+      'improve-home-routine',
+      'Improve the home routine',
+      'A homesteader grows by making daily home work more reliable.',
+      'progress',
+      ['Farming', 'Wood cutting', 'Pyro Farming'],
+      now
+    )
+  }
+
+  if (current.currentLifestyle === 'explorer') {
+    return goalFor(
+      'map-nearby-area',
+      'Map nearby area',
+      'An explorer needs a clearer picture of nearby places and paths.',
+      'curiosity',
+      ['Wild roaming'],
+      now
+    )
+  }
+
+  if (current.currentLifestyle === 'miner') {
+    return goalFor(
+      'gather-underground-resources',
+      'Gather underground resources',
+      'A miner advances by bringing useful materials back from below.',
+      'progress',
+      ['Mining'],
+      now
+    )
+  }
+
+  if (current.currentLifestyle === 'trader') {
+    return goalFor(
+      'build-surplus-for-trading',
+      'Build surplus for trading',
+      'A trader needs extra goods before useful exchanges can happen.',
+      'social',
+      ['Farming', 'Mining'],
+      now
+    )
+  }
+
+  if (current.currentLifestyle === 'protector') {
+    return goalFor(
+      'watch-over-familiar-players',
+      'Watch over familiar players',
+      'A protector pays attention to the people nearby.',
+      'social',
+      [],
+      now
+    )
+  }
+
+  return defaultGoal(now)
+}
+
+function updateNpcGoal (life, context, options = {}) {
+  const now = options.now ? options.now() : Date.now()
+  return normalizeNpcLife({
+    ...normalizeNpcLife(life, options),
+    currentGoal: chooseNpcGoal(life, context, options),
+    updatedAt: now
+  }, options)
 }
 
 function npcLifePath (options = {}) {
@@ -177,14 +345,20 @@ module.exports = {
   MAX_LIFE_STORY,
   MAX_RECENT_EVENTS,
   NPC_LIFE_VERSION,
+  applyNpcLifeEvent,
+  applyScoreDelta,
   clampScore,
+  chooseNpcGoal,
   defaultGoal,
   emptyNpcLife,
+  eventDeltas,
   normalizeGoal,
   normalizeNpcLife,
   normalizeScores,
   npcLifePath,
   readNpcLife,
+  updateLifestyleTransition,
+  updateNpcGoal,
   updateNpcLife,
   writeNpcLife
 }

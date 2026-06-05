@@ -56,6 +56,47 @@ describe('holocraft bot config', function () {
     assert.deepStrictEqual(life.lifeStory, ['I built a fence.'])
   })
 
+  it('normalizes goals safely without an explicit fallback', () => {
+    const { normalizeGoal } = require('../bot')
+
+    assert.strictEqual(normalizeGoal({ id: '' }).id, 'survive-and-settle')
+  })
+
+  it('evolves toward homesteader after repeated homesteader events', () => {
+    const { applyNpcLifeEvent, emptyNpcLife } = require('../bot')
+    let life = emptyNpcLife({ now: () => 1000 })
+
+    for (let i = 0; i < 6; i++) {
+      life = applyNpcLifeEvent(life, {
+        type: 'automation_started',
+        automation: 'Farming',
+        at: 1000 + i
+      }, { now: () => 1000 + i })
+    }
+
+    assert.strictEqual(life.currentLifestyle, 'homesteader')
+    assert.strictEqual(life.previousLifestyle, 'survivalist')
+    assert(life.lifeStory.some(entry => entry.includes('homesteader')))
+  })
+
+  it('selects food and night safety goals from current needs', () => {
+    const { chooseNpcGoal, emptyNpcLife } = require('../bot')
+    const life = emptyNpcLife({ now: () => 1000 })
+
+    assert.strictEqual(chooseNpcGoal(life, { food: 8, isNight: false, unsafe: false }, { now: () => 2000 }).id, 'secure-food')
+    assert.strictEqual(chooseNpcGoal(life, { food: 20, isNight: true, unsafe: false }, { now: () => 3000 }).id, 'stay-safe-until-morning')
+  })
+
+  it('updates NPC life with a selected goal', () => {
+    const { emptyNpcLife, updateNpcGoal } = require('../bot')
+    const life = emptyNpcLife({ now: () => 1000 })
+
+    const updated = updateNpcGoal(life, { food: 8 }, { now: () => 2000 })
+
+    assert.strictEqual(updated.currentGoal.id, 'secure-food')
+    assert.strictEqual(updated.updatedAt, 2000)
+  })
+
   it('profile store creates offline and online bot profiles locally', () => {
     const { createProfileStore } = require('../bot')
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-profiles-'))
