@@ -8138,6 +8138,38 @@ describe('holocraft bot config', function () {
     assert(!prompt.includes('state.life.currentGoal'))
   })
 
+  it('records AI NPC planner outcomes into NPC life state', async () => {
+    const { createNpcLifeController, runAiNpcCycle, readNpcLife } = require('../bot')
+    const npcLifePath = tempNpcLifePath()
+    const bot = new EventEmitter()
+    bot.username = 'TestBot123'
+    bot.health = 20
+    bot.food = 20
+    bot.time = { isDay: true, timeOfDay: 1000 }
+    bot.entity = { position: combatPosition(0, 64, 0) }
+    bot.inventory = { items: () => [] }
+    bot.players = {}
+
+    await runAiNpcCycle(bot, {
+      npcLife: createNpcLifeController({ npcLifePath, now: () => 1000 }),
+      automationManager: {
+        getStatus: () => ({ active: null }),
+        isIdle: () => true,
+        list: () => [{ name: 'Farming' }],
+        startByIndex: async () => true
+      },
+      followController: {
+        getStatus: () => ({ followedPlayerName: null }),
+        isIdle: () => true
+      },
+      runPlanner: async () => ({ action: 'start_automation', automation: 'Farming', reason: 'farm life' }),
+      now: () => 1000
+    })
+
+    const life = readNpcLife({ npcLifePath })
+    assert(life.recentEvents.some(event => event.type === 'automation_started' && event.automation === 'Farming'))
+  })
+
   it('asks Codex for an idle NPC plan and starts the selected automation', async () => {
     const { runAiNpcCycle } = require('../bot')
     const bot = new EventEmitter()

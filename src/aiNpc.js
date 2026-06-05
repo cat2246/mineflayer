@@ -281,6 +281,48 @@ function isAiNpcIdle (bot, options = {}) {
   return true
 }
 
+function aiNpcLifeContext (bot, options = {}) {
+  const now = options.now || (() => Date.now())
+  const timeOfDay = bot.time?.timeOfDay
+  const players = playersSnapshot(bot)
+
+  return {
+    food: typeof bot.food === 'number' ? bot.food : null,
+    isNight: bot.time?.isDay === false || (typeof timeOfDay === 'number' && timeOfDay >= 13000),
+    unsafe: !isAiNpcIdle(bot, options),
+    playersNearby: players.some(player => player.visible),
+    now: now()
+  }
+}
+
+function recordAiNpcLifeCycle (npcLife, context) {
+  if (typeof npcLife?.record !== 'function') return
+
+  npcLife.record({ type: 'cycle_idle', at: context.now })
+  npcLife.record({ type: context.isNight ? 'night' : 'day', at: context.now })
+  if (typeof context.food === 'number' && context.food < 12) {
+    npcLife.record({ type: 'low_food', at: context.now })
+  }
+  if (context.playersNearby) {
+    npcLife.record({ type: 'player_nearby', at: context.now })
+  }
+}
+
+function executionLifeEvent (instruction, execution, now) {
+  if (instruction.action === 'start_automation' && execution.ok !== false) {
+    return {
+      type: 'automation_started',
+      automation: execution.startedAutomation || instruction.automation,
+      at: now
+    }
+  }
+  if (instruction.action === 'follow_player' && execution.ok !== false) {
+    return { type: 'follow_started', player: instruction.player, at: now }
+  }
+  if (instruction.action === 'noop') return { type: 'planner_noop', at: now }
+  return null
+}
+
 function findAutomationIndex (automationManager, automationName) {
   const requested = cleanShortText(automationName, 80).toLowerCase()
   if (!requested || typeof automationManager?.list !== 'function') return -1
@@ -388,6 +430,10 @@ async function runAiNpcCycle (bot, options = {}) {
     }
   }
 
+  const lifeContext = aiNpcLifeContext(bot, options)
+  recordAiNpcLifeCycle(options.npcLife, lifeContext)
+  if (typeof options.npcLife?.updateGoal === 'function') options.npcLife.updateGoal(lifeContext)
+
   const state = createAiNpcState(bot, options)
   const runPlanner = options.runPlanner || createAiNpcPlannerRunner({
     ...buildCodexOptions(),
@@ -400,6 +446,8 @@ async function runAiNpcCycle (bot, options = {}) {
   const response = await runPlanner(state, createAiNpcPrompt(state))
   const instruction = parseAiNpcInstruction(response)
   const execution = await executeAiNpcInstruction(bot, instruction, options)
+  const lifeEvent = executionLifeEvent(instruction, execution, lifeContext.now)
+  if (lifeEvent && typeof options.npcLife?.record === 'function') options.npcLife.record(lifeEvent)
   debugLog('aiNpc.response', {
     action: instruction.action,
     ok: execution.ok !== false,

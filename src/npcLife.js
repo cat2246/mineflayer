@@ -354,6 +354,14 @@ function updateNpcLife (options, updater) {
   return nextLife
 }
 
+function createNpcLifeController (options = {}) {
+  return {
+    read: () => readNpcLife(options),
+    record: event => updateNpcLife(options, life => applyNpcLifeEvent(life, event, options)),
+    updateGoal: context => updateNpcLife(options, life => updateNpcGoal(life, context, options))
+  }
+}
+
 module.exports = {
   DEFAULT_LIFESTYLES,
   DEFAULT_TRAITS,
@@ -364,6 +372,7 @@ module.exports = {
   applyScoreDelta,
   clampScore,
   chooseNpcGoal,
+  createNpcLifeController,
   defaultGoal,
   emptyNpcLife,
   eventDeltas,

@@ -16,6 +16,7 @@ const { attachErrorLogMonitor } = require('./issueRecorder')
 const { attachKnockbackPause } = require('./knockbackPause')
 const { startLogTerminal } = require('./logTerminal')
 const { attachNightSafety } = require('./nightSafety')
+const { createNpcLifeController } = require('./npcLife')
 const { closeViewer } = require('./viewer')
 
 const RECONNECT_DELAY_MS = 180000
@@ -125,7 +126,8 @@ function createBot (options = buildBotOptions(), runtimeOptions = {}) {
   startConsole(bot, { debugLog, automationManager, followController, knockbackController, nightSafetyController })
   attachCombat(bot, { debugLog })
   attachAiChat(bot, { debugLog })
-  attachAiNpc(bot, { debugLog, automationManager, followController })
+  const npcLife = createNpcLifeController()
+  attachAiNpc(bot, { debugLog, automationManager, followController, npcLife })
   attachErrorLogMonitor(bot, { debugLog })
   attachReconnectHandler(bot, {
     debugLog,
