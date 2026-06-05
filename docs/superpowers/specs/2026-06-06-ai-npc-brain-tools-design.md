@@ -190,6 +190,82 @@ The runtime validates:
 - movement/building action is not destructive beyond policy
 - bot is in a valid state for the tool
 
+If Codex asks for a tool that does not exist, or if it describes an action that the current tool registry cannot perform, the runtime should record that missing capability instead of silently failing. This is part of the NPC's self-improvement loop.
+
+## Missing Capability Backlog
+
+The NPC should be able to notice the gap between what it wants to do and what it can currently do. For example, if its goal is to upgrade gear but it has no mining tool interface, it should record a missing mining capability so future development can add the tool.
+
+Missing capability records should answer:
+
+- What goal was blocked?
+- What action did the NPC want to take?
+- Which tool or capability was missing?
+- Why did the NPC believe it needed that capability?
+- What state made the need visible?
+- How often has this same need appeared?
+- How important is it to the NPC's life goals?
+
+Recommended record shape:
+
+```json
+{
+  "id": "mine_ore-for-gear-upgrade",
+  "status": "open",
+  "capability": "mine ore safely",
+  "desiredTool": "mine_block_or_vein",
+  "blockedGoal": "Upgrade from stone tools to iron gear.",
+  "reason": "The NPC needs iron ore but has no safe mining tool.",
+  "context": {
+    "location": "near home",
+    "inventory": ["stone_pickaxe", "torch"],
+    "knownNeed": "iron ingots"
+  },
+  "priority": "high",
+  "count": 3,
+  "firstSeenAt": 1765000000000,
+  "lastSeenAt": 1765003600000,
+  "suggestedInputs": ["blockType", "maxDistance", "safetyPolicy"],
+  "suggestedResult": "mined block count, collected items, danger encountered"
+}
+```
+
+There should be two views of this backlog:
+
+- **Per-bot backlog:** What this specific NPC has learned it needs, stored in that bot's memory root.
+- **Shared developer backlog:** Deduped missing tools across all bots, used by the human developer to decide what to implement next.
+
+The existing missing-function recorder can inspire the first implementation, but this new backlog should be structured data rather than only markdown. Markdown can still be generated as a human-readable report.
+
+### Missing Capability Flow
+
+When a capability is missing:
+
+1. Codex proposes a tool call or action intent.
+2. The validator cannot match it to an allowlisted tool.
+3. The runtime records a missing capability event.
+4. The per-bot `missing-tools.json` entry is created or updated.
+5. A shared backlog entry is created or updated.
+6. The tool result tells Codex that the capability is not available yet.
+7. Codex chooses a fallback action, such as preparing resources it can gather, returning home, journaling the need, or switching to a different goal.
+
+Repeated requests should update `count`, `lastSeenAt`, recent examples, and priority rather than creating endless duplicates. Deduplication should use normalized capability name, desired tool name, and blocked goal.
+
+Example fallback:
+
+```json
+{
+  "tool": "record_missing_tool",
+  "args": {
+    "capability": "mine ore safely",
+    "desiredTool": "mine_block_or_vein",
+    "blockedGoal": "Upgrade gear",
+    "reason": "I need iron but cannot mine or navigate caves yet."
+  },
+  "reason": "I should remember this missing ability so my toolset can improve later."
+}
+```
+
 ## Initial Tool Categories
 
 ### World And Observation
@@ -279,6 +355,8 @@ Building tools should start conservative. The first milestone should avoid large
 
 - `read_memory_summary`
 - `write_memory_event`
+- `record_missing_tool`
+- `read_missing_tools`
 - `remember_project`
 - `update_project`
 - `write_journal_reflection`
@@ -300,6 +378,7 @@ data/bots/<bot-id>/
   crafting.json
   building.json
   cooking.json
+  missing-tools.json
   memory-summary.json
   event-log.jsonl
   daily-journal.md
@@ -350,6 +429,8 @@ Memory should be layered so token usage stays bounded:
 
 Only working memory, relevant structured records, and the current summary should go into normal Codex prompts.
 
+Missing tools belong to structured memory. Normal prompts should include only the top relevant open missing tools, such as the top 3 items related to the current goal. Full missing-tool history should stay out of the prompt.
+
 ### Memory Compression
 
 Memory compression runs during deep reflection every 30 real minutes and may also run when event logs exceed size limits.
@@ -362,6 +443,7 @@ The compression job should:
 - update `memory-summary.json`
 - append a short entry to `daily-journal.md`
 - mark compressed event offsets so old raw events do not need to be sent again
+- merge duplicate missing-tool records and raise priority for repeated blockers
 
 Prompt memory should have hard budgets:
 
@@ -384,6 +466,9 @@ Example `memory-summary.json`:
   ],
   "knownRisks": [
     "Night near home is unsafe because lighting is incomplete."
+  ],
+  "importantMissingTools": [
+    "Needs a safe mining tool to gather iron for gear upgrades."
   ],
   "recentImportantEvents": [
     "Set home after /rtp.",
@@ -447,6 +532,8 @@ Build the new architecture in a narrow, testable slice:
   - `inspect_inventory`
   - `remember_place`
   - `write_memory_event`
+  - `record_missing_tool`
+  - `read_missing_tools`
 - no full crafting/building/cooking yet; define their interfaces for later milestones
 
 ## Later Milestones
@@ -456,7 +543,8 @@ Build the new architecture in a narrow, testable slice:
 3. Add cooking and smelting tools.
 4. Add simple building tools.
 5. Add project memory.
-6. Retire automation menu from NPC flow.
+6. Generate a human-readable missing-tool report from the structured backlog.
+7. Retire automation menu from NPC flow.
 
 ## Acceptance Criteria
 
@@ -468,5 +556,8 @@ Build the new architecture in a narrow, testable slice:
 - Deep reflection runs every 30 real minutes.
 - Memory compression prevents prompt growth by sending summaries and relevant records instead of full history.
 - Tool calls are allowlisted and validated.
+- Missing or unavailable capabilities are recorded as structured backlog items.
+- Repeated missing capability requests are deduped and prioritized.
+- Codex receives a clear failure result and chooses a fallback action when a desired tool does not exist.
 - Each bot reads/writes its own memory files.
 - Existing random five-minute automation behavior does not return.
