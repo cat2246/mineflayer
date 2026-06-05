@@ -1,13 +1,10 @@
 const path = require('path')
 
-const DEFAULT_HOST = 'play.holocraft.xyz'
 const DEFAULT_PORT = 25565
-const DEFAULT_USERNAME = 'PokiMoki82719'
 const DEFAULT_AUTH = 'offline'
 const DEFAULT_BOT_VERSION = '1.21.10'
 const VIEWER_PORT = 3007
 const SERVER_LOGIN_DELAY_MS = 1000
-const DEFAULT_SERVER_LOGIN_COMMAND = '/login PqOwIeUr0192'
 const SURVIVAL_COMMAND_DELAY_MS = 5000
 const PHYSICS_ENABLE_DELAY_MS = 10000
 const WINDOW_OPEN_TIMEOUT_MS = 10000
@@ -74,17 +71,23 @@ const DEBUG_LOG_MAX_BYTES = 5 * 1024 * 1024
 const DEBUG_LOG_MAX_FILES = 3
 
 function buildBotOptions (argv = process.argv, env = process.env) {
-  const username = env.MINECRAFT_USERNAME || argv[2] || DEFAULT_USERNAME
-  const version = env.MINECRAFT_VERSION || argv[3] || DEFAULT_BOT_VERSION
+  const host = env.MINECRAFT_HOST || argv[2]
+  const port = Number.parseInt(env.MINECRAFT_PORT || DEFAULT_PORT, 10)
+  const username = env.MINECRAFT_USERNAME || argv[3]
+  const version = env.MINECRAFT_VERSION || argv[4] || DEFAULT_BOT_VERSION
   const auth = env.MINECRAFT_AUTH || DEFAULT_AUTH
 
+  if (!host) {
+    throw new Error('Missing Minecraft host. Set MINECRAFT_HOST or pass it as the first argument.')
+  }
+
   if (!username) {
-    throw new Error('Missing Minecraft username. Set MINECRAFT_USERNAME or pass it as the first argument.')
+    throw new Error('Missing Minecraft username. Set MINECRAFT_USERNAME or pass it as the second argument.')
   }
 
   return {
-    host: DEFAULT_HOST,
-    port: DEFAULT_PORT,
+    host,
+    port,
     username,
     auth,
     version,
@@ -100,7 +103,7 @@ function buildBotOptions (argv = process.argv, env = process.env) {
 function buildServerLoginCommand (env = process.env) {
   if (env.SERVER_LOGIN_COMMAND) return env.SERVER_LOGIN_COMMAND
   if (env.SERVER_LOGIN_PASSWORD) return `/login ${env.SERVER_LOGIN_PASSWORD}`
-  return DEFAULT_SERVER_LOGIN_COMMAND
+  return null
 }
 
 function buildViewerOptions () {
@@ -127,10 +130,7 @@ module.exports = {
   COMBAT_TARGET_RANGE,
   DEFAULT_AUTH,
   DEFAULT_BOT_VERSION,
-  DEFAULT_HOST,
   DEFAULT_PORT,
-  DEFAULT_SERVER_LOGIN_COMMAND,
-  DEFAULT_USERNAME,
   CONTAINER_HOUSE_SIZE,
   CONTAINER_INTERACTION_DELAY_MAX_MS,
   CONTAINER_INTERACTION_DELAY_MIN_MS,

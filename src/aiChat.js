@@ -445,7 +445,8 @@ function botMentionAliases (botName, aliases = []) {
   const names = new Set([botName, ...aliases].filter(Boolean).map(String))
   const shortName = String(botName || '').replace(/\d+$/g, '')
   if (shortName) names.add(shortName)
-  if (botName === 'PokiMoki82719') names.add('PokiMoki81719')
+  const oneDigitTypo = String(botName || '').replace(/\d$/, digit => String(Math.max(0, Number(digit) - 1)))
+  if (oneDigitTypo && oneDigitTypo !== botName) names.add(oneDigitTypo)
   return [...names]
 }
 

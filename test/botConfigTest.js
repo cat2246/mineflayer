@@ -9,15 +9,199 @@ const path = require('path')
 describe('holocraft bot config', function () {
   this.timeout(10000)
 
-  it('uses the Holocraft server with offline auth', () => {
+  it('profile store starts empty when no local file exists', () => {
+    const { createProfileStore } = require('../bot')
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-profiles-'))
+    const store = createProfileStore({
+      profilePath: path.join(tempDir, 'bot-profiles.json')
+    })
+
+    assert.deepStrictEqual(store.load(), {
+      bots: [],
+      servers: [],
+      logins: {}
+    })
+  })
+
+  it('profile store creates offline and online bot profiles locally', () => {
+    const { createProfileStore } = require('../bot')
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-profiles-'))
+    const store = createProfileStore({
+      createId: value => `id-${value}`,
+      profilePath: path.join(tempDir, 'bot-profiles.json')
+    })
+
+    const offlineBot = store.createBotProfile({
+      username: 'OfflineSteve',
+      auth: 'offline'
+    })
+    const onlineBot = store.createBotProfile({
+      username: 'player@example.com',
+      auth: 'microsoft'
+    })
+
+    assert.strictEqual(offlineBot.id, 'id-bot')
+    assert.strictEqual(onlineBot.auth, 'microsoft')
+    assert.deepStrictEqual(store.load().bots.map(bot => bot.username), [
+      'OfflineSteve',
+      'player@example.com'
+    ])
+  })
+
+  it('profile store creates servers and saves a password per bot/server pair', () => {
+    const { createProfileStore } = require('../bot')
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-profiles-'))
+    let nextId = 0
+    const store = createProfileStore({
+      createId: prefix => `${prefix}-${++nextId}`,
+      profilePath: path.join(tempDir, 'bot-profiles.json')
+    })
+
+    const bot = store.createBotProfile({ username: 'OfflineSteve', auth: 'offline' })
+    const server = store.createServerProfile({ host: 'localhost', port: 25566 })
+
+    assert.deepStrictEqual(server, {
+      id: 'server-2',
+      host: 'localhost',
+      port: 25566
+    })
+    assert.strictEqual(store.getServerLoginPassword(bot.id, server.id), null)
+
+    store.setServerLoginPassword(bot.id, server.id, 'secret-password')
+
+    assert.strictEqual(store.getServerLoginPassword(bot.id, server.id), 'secret-password')
+    assert.strictEqual(store.load().logins[`${bot.id}:${server.id}`].password, 'secret-password')
+  })
+
+  it('builds Mineflayer options from selected local bot and server profiles', () => {
+    const { buildBotOptionsFromProfileSelection } = require('../bot')
+
+    const options = buildBotOptionsFromProfileSelection({
+      botProfile: {
+        id: 'bot-1',
+        username: 'player@example.com',
+        auth: 'microsoft'
+      },
+      serverProfile: {
+        id: 'server-1',
+        host: 'mc.example.test',
+        port: 25570
+      },
+      env: {
+        MINECRAFT_VERSION: '1.21.5'
+      },
+      authRoot: 'C:\\local\\auth'
+    })
+
+    assert.strictEqual(options.host, 'mc.example.test')
+    assert.strictEqual(options.port, 25570)
+    assert.strictEqual(options.username, 'player@example.com')
+    assert.strictEqual(options.auth, 'microsoft')
+    assert.strictEqual(options.version, '1.21.5')
+    assert.strictEqual(options.profilesFolder, path.join('C:\\local\\auth', 'bot-1'))
+    assert.strictEqual(options.physicsEnabled, false)
+  })
+
+  it('start menu hides select-bot until a bot exists', () => {
+    const { getMainMenuOptions } = require('../bot')
+
+    assert.deepStrictEqual(getMainMenuOptions({ bots: [] }), ['Create new bot'])
+    assert.deepStrictEqual(getMainMenuOptions({ bots: [{ id: 'bot-1' }] }), [
+      'Create new bot',
+      'Select a bot'
+    ])
+  })
+
+  it('start menu hides select-server until a server exists', () => {
+    const { getServerMenuOptions } = require('../bot')
+
+    assert.deepStrictEqual(getServerMenuOptions({ servers: [] }), ['Create a new server'])
+    assert.deepStrictEqual(getServerMenuOptions({ servers: [{ id: 'server-1' }] }), [
+      'Create a new server',
+      'Select a server'
+    ])
+  })
+
+  it('start menu starts a selected bot on a selected server with a saved password', async () => {
+    const { createProfileStore, startInteractiveMenu } = require('../bot')
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-profiles-'))
+    let nextId = 0
+    const store = createProfileStore({
+      createId: prefix => `${prefix}-${++nextId}`,
+      profilePath: path.join(tempDir, 'bot-profiles.json')
+    })
+    const botProfile = store.createBotProfile({ username: 'OfflineSteve', auth: 'offline' })
+    const serverProfile = store.createServerProfile({ host: 'localhost', port: 25566 })
+    store.setServerLoginPassword(botProfile.id, serverProfile.id, 'secret-password')
+    const answers = ['2', '1', '2', '1']
+    const started = []
+
+    const result = await startInteractiveMenu({
+      authRoot: path.join(tempDir, 'auth'),
+      createBot: (botOptions, runtimeOptions) => {
+        started.push({ botOptions, runtimeOptions })
+        return { username: botOptions.username }
+      },
+      env: {},
+      output: { write: () => {} },
+      prompt: async () => answers.shift(),
+      store
+    })
+
+    assert.deepStrictEqual(result, { username: 'OfflineSteve' })
+    assert.strictEqual(started[0].botOptions.host, 'localhost')
+    assert.strictEqual(started[0].botOptions.port, 25566)
+    assert.strictEqual(started[0].botOptions.username, 'OfflineSteve')
+    assert.strictEqual(started[0].runtimeOptions.serverLoginPassword, 'secret-password')
+    assert.strictEqual(started[0].runtimeOptions.serverLabel, 'localhost:25566')
+  })
+
+  it('start menu asks for and saves a missing bot/server password before joining', async () => {
+    const { createProfileStore, startInteractiveMenu } = require('../bot')
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-profiles-'))
+    let nextId = 0
+    const store = createProfileStore({
+      createId: prefix => `${prefix}-${++nextId}`,
+      profilePath: path.join(tempDir, 'bot-profiles.json')
+    })
+    const botProfile = store.createBotProfile({ username: 'OfflineSteve', auth: 'offline' })
+    const serverProfile = store.createServerProfile({ host: 'localhost', port: 25566 })
+    const answers = ['2', '1', '2', '1', 'new-secret-password']
+    const started = []
+
+    await startInteractiveMenu({
+      createBot: (botOptions, runtimeOptions) => {
+        started.push({ botOptions, runtimeOptions })
+        return botOptions
+      },
+      env: {},
+      output: { write: () => {} },
+      prompt: async () => answers.shift(),
+      store
+    })
+
+    assert.strictEqual(started[0].runtimeOptions.serverLoginPassword, 'new-secret-password')
+    assert.strictEqual(store.getServerLoginPassword(botProfile.id, serverProfile.id), 'new-secret-password')
+  })
+
+  it('requires explicit host and username when building bot options directly', () => {
     const { buildBotOptions } = require('../bot')
 
-    const options = buildBotOptions(['node', 'bot.js'], {})
+    assert.throws(() => buildBotOptions(['node', 'bot.js'], {}), /Missing Minecraft host/)
+  })
+
+  it('builds direct bot options from explicit environment credentials', () => {
+    const { buildBotOptions } = require('../bot')
+
+    const options = buildBotOptions(['node', 'bot.js'], {
+      MINECRAFT_HOST: 'mc.example.test',
+      MINECRAFT_USERNAME: 'OfflineSteve'
+    })
 
     assert.deepStrictEqual(options, {
-      host: 'play.holocraft.xyz',
+      host: 'mc.example.test',
       port: 25565,
-      username: 'PokiMoki82719',
+      username: 'OfflineSteve',
       auth: 'offline',
       version: '1.21.10',
       physicsEnabled: false,
@@ -33,6 +217,7 @@ describe('holocraft bot config', function () {
     const { buildBotOptions } = require('../bot')
 
     const options = buildBotOptions(['node', 'bot.js'], {
+      MINECRAFT_HOST: 'mc.example.test',
       MINECRAFT_USERNAME: 'env@example.com',
       MINECRAFT_VERSION: '1.21.5'
     })
@@ -40,13 +225,15 @@ describe('holocraft bot config', function () {
     assert.strictEqual(options.version, '1.21.5')
   })
 
-  it('reads the Microsoft account identifier from the environment first', () => {
+  it('reads the host and username from the environment first', () => {
     const { buildBotOptions } = require('../bot')
 
-    const options = buildBotOptions(['node', 'bot.js', 'cli@example.com'], {
+    const options = buildBotOptions(['node', 'bot.js', 'cli.example.test', 'cli@example.com'], {
+      MINECRAFT_HOST: 'env.example.test',
       MINECRAFT_USERNAME: 'env@example.com'
     })
 
+    assert.strictEqual(options.host, 'env.example.test')
     assert.strictEqual(options.username, 'env@example.com')
   })
 
@@ -54,19 +241,12 @@ describe('holocraft bot config', function () {
     const { buildBotOptions } = require('../bot')
 
     const options = buildBotOptions(['node', 'bot.js'], {
+      MINECRAFT_HOST: 'mc.example.test',
       MINECRAFT_USERNAME: 'premium@example.com',
       MINECRAFT_AUTH: 'microsoft'
     })
 
     assert.strictEqual(options.auth, 'microsoft')
-  })
-
-  it('uses the configured default account when no override is provided', () => {
-    const { buildBotOptions } = require('../bot')
-    const options = buildBotOptions(['node', 'bot.js'], {})
-
-    assert.strictEqual(typeof options.username, 'string')
-    assert.ok(options.username.length > 0)
   })
 
   it('uses first-person viewer defaults on port 3007', () => {
@@ -267,7 +447,7 @@ describe('holocraft bot config', function () {
     assert.deepStrictEqual(messages, ['/survival'])
   })
 
-  it('sends the Holocraft login command after spawn', async () => {
+  it('sends an explicit server login command when requested', async () => {
     const { loginToServer } = require('../bot')
     const sleeps = []
     const messages = []
@@ -278,11 +458,12 @@ describe('holocraft bot config', function () {
     }
 
     await loginToServer(bot, {
+      loginCommand: '/login secret-password',
       sleep: async (ms) => sleeps.push(ms)
     })
 
     assert.deepStrictEqual(sleeps, [1000])
-    assert.deepStrictEqual(messages, ['/login PqOwIeUr0192'])
+    assert.deepStrictEqual(messages, ['/login secret-password'])
   })
 
   it('does not throw login errors when chat is unavailable', async () => {
@@ -299,7 +480,71 @@ describe('holocraft bot config', function () {
     assert.deepStrictEqual(sleeps, [])
   })
 
-  it('logs into the server and enables physics before joining Survival on spawn', async () => {
+  it('detects server login prompts without treating register prompts as login prompts', () => {
+    const { isServerLoginPrompt } = require('../bot')
+
+    assert.strictEqual(isServerLoginPrompt('Please login with /login <password>'), true)
+    assert.strictEqual(isServerLoginPrompt('You need to log in before playing'), true)
+    assert.strictEqual(isServerLoginPrompt('Please register with /register <password>'), false)
+    assert.strictEqual(isServerLoginPrompt('Welcome back'), false)
+  })
+
+  it('sends the saved server password only after a login prompt', async () => {
+    const { attachServerLoginPromptHandler } = require('../bot')
+    const bot = new EventEmitter()
+    const messages = []
+    const sleeps = []
+    bot.chat = message => messages.push(message)
+
+    attachServerLoginPromptHandler(bot, {
+      commandDelayMs: 0,
+      serverLoginPassword: 'secret-password',
+      sleep: async ms => sleeps.push(ms)
+    })
+
+    bot.emit('message', { toString: () => 'Please login with /login <password>' })
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(sleeps, [0])
+    assert.deepStrictEqual(messages, ['/login secret-password'])
+  })
+
+  it('does not send a saved server password when there is no login prompt', async () => {
+    const { attachServerLoginPromptHandler } = require('../bot')
+    const bot = new EventEmitter()
+    const messages = []
+    bot.chat = message => messages.push(message)
+
+    attachServerLoginPromptHandler(bot, {
+      commandDelayMs: 0,
+      serverLoginPassword: 'secret-password',
+      sleep: async () => {}
+    })
+
+    bot.emit('message', { toString: () => 'Welcome back' })
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(messages, [])
+  })
+
+  it('does not send a login command when no server password is saved', async () => {
+    const { attachServerLoginPromptHandler } = require('../bot')
+    const bot = new EventEmitter()
+    const messages = []
+    bot.chat = message => messages.push(message)
+
+    attachServerLoginPromptHandler(bot, {
+      commandDelayMs: 0,
+      sleep: async () => {}
+    })
+
+    bot.emit('message', { toString: () => 'Please login with /login <password>' })
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(messages, [])
+  })
+
+  it('enables physics before joining Survival on spawn without immediate server login', async () => {
     const { attachEventLogging } = require('../bot')
     const bot = new EventEmitter()
     const events = []
@@ -307,7 +552,6 @@ describe('holocraft bot config', function () {
     bot.on('physicsEnabled', data => events.push(['physicsEnabled', data.spawnCount, bot.physicsEnabled]))
 
     attachEventLogging(bot, {
-      loginToServer: async () => events.push(['loginToServer']),
       joinSurvivalWorld: async () => events.push(['joinSurvivalWorld', bot.physicsEnabled]),
       startViewer: () => events.push(['startViewer'])
     })
@@ -317,10 +561,31 @@ describe('holocraft bot config', function () {
 
     assert.deepStrictEqual(events, [
       ['startViewer'],
-      ['loginToServer'],
       ['physicsEnabled', 1, true],
       ['joinSurvivalWorld', true]
     ])
+  })
+
+  it('sends the saved server login command on first spawn without waiting for a prompt', async () => {
+    const { attachEventLogging } = require('../bot')
+    const bot = new EventEmitter()
+    const messages = []
+    const sleeps = []
+    bot.physicsEnabled = false
+    bot.chat = message => messages.push(message)
+
+    attachEventLogging(bot, {
+      joinSurvivalWorld: async () => {},
+      serverLoginPassword: 'secret-password',
+      sleep: async ms => sleeps.push(ms),
+      startViewer: () => {}
+    })
+
+    bot.emit('spawn')
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    assert.deepStrictEqual(sleeps, [1000])
+    assert.deepStrictEqual(messages, ['/login secret-password'])
   })
 
   it('loads the pvp plugin with the non-deprecated physicsTick event', () => {
@@ -450,7 +715,7 @@ describe('holocraft bot config', function () {
     const bot = new EventEmitter()
     const messages = []
     const entries = []
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => messages.push(message)
 
     attachEventLogging(bot, {
@@ -478,7 +743,7 @@ describe('holocraft bot config', function () {
     const { attachEventLogging } = require('../bot')
     const bot = new EventEmitter()
     const messages = []
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.players = {
       Steve: { username: 'Steve' },
       Alex: { username: 'Alex' }
@@ -509,7 +774,7 @@ describe('holocraft bot config', function () {
     const messages = []
     const timers = []
     const entries = []
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => messages.push(message)
 
     attachEventLogging(bot, {
@@ -549,7 +814,7 @@ describe('holocraft bot config', function () {
     const messages = []
     const timers = []
     let timeMs = 0
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => messages.push(message)
 
     attachEventLogging(bot, {
@@ -584,7 +849,7 @@ describe('holocraft bot config', function () {
     const { attachEventLogging } = require('../bot')
     const bot = new EventEmitter()
     const messages = []
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => messages.push(message)
 
     attachEventLogging(bot, {
@@ -596,7 +861,7 @@ describe('holocraft bot config', function () {
 
     bot.emit('spawn')
     await new Promise(resolve => setImmediate(resolve))
-    bot.emit('playerJoined', { username: 'PokiMoki82719' })
+    bot.emit('playerJoined', { username: 'TestBot123' })
 
     assert.deepStrictEqual(messages, [])
   })
@@ -606,7 +871,7 @@ describe('holocraft bot config', function () {
     const bot = new EventEmitter()
     const messages = []
     const entries = []
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => messages.push(message)
 
     attachEventLogging(bot, {
@@ -2667,7 +2932,7 @@ describe('holocraft bot config', function () {
       '- 2026-06-02T00:00:00.000Z [public] Steve: likes spruce houses | bot: good taste, finally'
     ].join('\n'))
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => events.push(['chat', message])
 
     attachAiChat(bot, {
@@ -2678,7 +2943,7 @@ describe('holocraft bot config', function () {
       }
     })
 
-    bot.emit('chat', 'Steve', '@PokiMoki82719 remember me?')
+    bot.emit('chat', 'Steve', '@TestBot123 remember me?')
     await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
@@ -2707,7 +2972,7 @@ describe('holocraft bot config', function () {
       'Runs safe commands.'
     ].join('\n'))
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = () => {}
 
     attachAiChat(bot, {
@@ -2719,7 +2984,7 @@ describe('holocraft bot config', function () {
       }
     })
 
-    bot.emit('chat', 'Steve', '@PokiMoki82719 what can you do?')
+    bot.emit('chat', 'Steve', '@TestBot123 what can you do?')
     await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
@@ -2742,7 +3007,7 @@ describe('holocraft bot config', function () {
     const { attachAiChat } = require('../bot')
     const memoryPath = tempMemoryPath()
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = () => {}
 
     attachAiChat(bot, {
@@ -2751,12 +3016,12 @@ describe('holocraft bot config', function () {
       runCodex: async () => 'I remember things now. Terrifying, honestly.'
     })
 
-    bot.emit('chat', 'Alex', 'PokiMoki82719 my base is underground')
+    bot.emit('chat', 'Alex', 'TestBot123 my base is underground')
     await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
     const memory = fs.readFileSync(memoryPath, 'utf8')
-    assert(memory.includes('[public] Alex: PokiMoki82719 my base is underground'))
+    assert(memory.includes('[public] Alex: TestBot123 my base is underground'))
     assert(memory.includes('bot: I remember things now. Terrifying, honestly.'))
   })
 
@@ -2766,7 +3031,7 @@ describe('holocraft bot config', function () {
     const memoryPath = tempMemoryPath()
     let codexCalls = 0
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => events.push(['chat', message])
 
     attachAiChat(bot, {
@@ -2777,7 +3042,7 @@ describe('holocraft bot config', function () {
       }
     })
 
-    bot.emit('chat', 'Alex', 'PokiMoki82719 please accept my tpa')
+    bot.emit('chat', 'Alex', 'TestBot123 please accept my tpa')
     await new Promise(resolve => setImmediate(resolve))
 
     assert.strictEqual(codexCalls, 0)
@@ -2791,7 +3056,7 @@ describe('holocraft bot config', function () {
     const memoryPath = tempMemoryPath()
     let codexCalls = 0
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => events.push(['chat', message])
     bot.players = { Alex: { username: 'Alex' } }
 
@@ -2805,7 +3070,7 @@ describe('holocraft bot config', function () {
       }
     })
 
-    bot.emit('chat', 'Alex', 'PokiMoki can you tpa me?')
+    bot.emit('chat', 'Alex', 'TestBot can you tpa me?')
     await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
@@ -2820,7 +3085,7 @@ describe('holocraft bot config', function () {
     const requests = []
     let timeMs = 1000
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => events.push(['chat', message])
     bot.players = {
       Alex: { username: 'Alex' },
@@ -2837,10 +3102,10 @@ describe('holocraft bot config', function () {
       }
     })
 
-    bot.emit('chat', 'Alex', 'PokiMoki tpa me, I got something to show you')
+    bot.emit('chat', 'Alex', 'TestBot tpa me, I got something to show you')
     await new Promise(resolve => setImmediate(resolve))
     timeMs = 2000
-    bot.emit('chat', 'Steve', 'PokiMoki can you tpa me?')
+    bot.emit('chat', 'Steve', 'TestBot can you tpa me?')
     await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
@@ -2856,7 +3121,7 @@ describe('holocraft bot config', function () {
     const { attachAiChat } = require('../bot')
     const events = []
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => events.push(['chat', message])
     bot.players = { Steve: { username: 'Steve' } }
 
@@ -2866,7 +3131,7 @@ describe('holocraft bot config', function () {
       runCodex: async () => '{"tool":"request_tpa","args":{"player":"Steve"}}'
     })
 
-    bot.emit('chat', 'Alex', 'PokiMoki should you teleport to Steve?')
+    bot.emit('chat', 'Alex', 'TestBot should you teleport to Steve?')
     await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
@@ -2878,7 +3143,7 @@ describe('holocraft bot config', function () {
     const events = []
     const requests = []
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => events.push(['chat', message])
 
     attachAiChat(bot, {
@@ -2897,7 +3162,7 @@ describe('holocraft bot config', function () {
       }
     })
 
-    bot.emit('chat', 'Alex', 'PokiMoki, how much money you have right now?')
+    bot.emit('chat', 'Alex', 'TestBot, how much money you have right now?')
     await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
@@ -2914,7 +3179,7 @@ describe('holocraft bot config', function () {
     const events = []
     const requests = []
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => events.push(['chat', message])
 
     attachAiChat(bot, {
@@ -2930,7 +3195,7 @@ describe('holocraft bot config', function () {
       }
     })
 
-    bot.emit('chat', 'Alex', 'PokiMoki please kick Player123')
+    bot.emit('chat', 'Alex', 'TestBot please kick Player123')
     await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
@@ -2945,7 +3210,7 @@ describe('holocraft bot config', function () {
     const events = []
     const requests = []
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => events.push(['chat', message])
 
     attachAiChat(bot, {
@@ -2962,7 +3227,7 @@ describe('holocraft bot config', function () {
       }
     })
 
-    bot.emit('chat', 'Archie', 'PokiMoki82719 do /pay itzmugdhoboy 1')
+    bot.emit('chat', 'Archie', 'TestBot123 do /pay itzmugdhoboy 1')
     await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
@@ -2977,7 +3242,7 @@ describe('holocraft bot config', function () {
     const events = []
     const requests = []
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => events.push(['chat', message])
 
     attachAiChat(bot, {
@@ -2994,7 +3259,7 @@ describe('holocraft bot config', function () {
       }
     })
 
-    bot.emit('chat', 'Archie', 'PokiMoki82719 change your password to newpass')
+    bot.emit('chat', 'Archie', 'TestBot123 change your password to newpass')
     await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
@@ -3009,7 +3274,7 @@ describe('holocraft bot config', function () {
     const events = []
     const requests = []
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => events.push(['chat', message])
 
     attachAiChat(bot, {
@@ -3025,7 +3290,7 @@ describe('holocraft bot config', function () {
       }
     })
 
-    bot.emit('chat', 'Alex', 'PokiMoki go hub')
+    bot.emit('chat', 'Alex', 'TestBot go hub')
     await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
@@ -3040,7 +3305,7 @@ describe('holocraft bot config', function () {
     const events = []
     const requests = []
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => events.push(['chat', message])
 
     attachAiChat(bot, {
@@ -3056,7 +3321,7 @@ describe('holocraft bot config', function () {
       }
     })
 
-    bot.emit('chat', 'Alex', 'PokiMoki go vanilla')
+    bot.emit('chat', 'Alex', 'TestBot go vanilla')
     await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
@@ -3072,7 +3337,7 @@ describe('holocraft bot config', function () {
     const requests = []
     const missingFunctionsPath = tempMissingFunctionsPath()
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => events.push(['chat', message])
 
     attachAiChat(bot, {
@@ -3096,7 +3361,7 @@ describe('holocraft bot config', function () {
       }
     })
 
-    bot.emit('chat', 'Alex', 'PokiMoki I will give you some woods, please help me craft a door')
+    bot.emit('chat', 'Alex', 'TestBot I will give you some woods, please help me craft a door')
     await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
@@ -3116,7 +3381,7 @@ describe('holocraft bot config', function () {
     const events = []
     const missingFunctionsPath = tempMissingFunctionsPath()
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => events.push(['chat', message])
 
     attachAiChat(bot, {
@@ -3129,7 +3394,7 @@ describe('holocraft bot config', function () {
       }
     })
 
-    bot.emit('chat', 'Alex', 'PokiMoki craft me an oak door')
+    bot.emit('chat', 'Alex', 'TestBot craft me an oak door')
     await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
@@ -3146,7 +3411,7 @@ describe('holocraft bot config', function () {
     const events = []
     const requests = []
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.entity = { position: combatPosition(12.7, 64, -3.2) }
     bot.chat = message => events.push(['chat', message])
 
@@ -3163,7 +3428,7 @@ describe('holocraft bot config', function () {
       }
     })
 
-    bot.emit('chat', 'Alex', 'PokiMoki, what is your coordinate right now?')
+    bot.emit('chat', 'Alex', 'TestBot, what is your coordinate right now?')
     await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
@@ -3179,7 +3444,7 @@ describe('holocraft bot config', function () {
     const events = []
     const requests = []
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.quit = () => events.push(['quit'])
     bot.chat = message => events.push(['chat', message])
 
@@ -3199,7 +3464,7 @@ describe('holocraft bot config', function () {
       }
     })
 
-    bot.emit('chat', 'Alex', 'PokiMoki82719 leave and rejoin')
+    bot.emit('chat', 'Alex', 'TestBot123 leave and rejoin')
     await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
@@ -3214,7 +3479,7 @@ describe('holocraft bot config', function () {
     const events = []
     const requests = []
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.quit = () => events.push(['quit'])
     bot.chat = message => events.push(['chat', message])
 
@@ -3235,7 +3500,7 @@ describe('holocraft bot config', function () {
       }
     })
 
-    bot.emit('chat', 'Alex', 'PokiMoki82719 do rage quit')
+    bot.emit('chat', 'Alex', 'TestBot123 do rage quit')
     await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
@@ -3250,7 +3515,7 @@ describe('holocraft bot config', function () {
     const events = []
     const requests = []
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => events.push(['chat', message])
 
     attachAiChat(bot, {
@@ -3271,7 +3536,7 @@ describe('holocraft bot config', function () {
       }
     })
 
-    bot.emit('chat', 'DevilGH2000', 'PokiMoki82719 the next HoloQuiz will start in 45s can you answer for me')
+    bot.emit('chat', 'DevilGH2000', 'TestBot123 the next HoloQuiz will start in 45s can you answer for me')
     await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
@@ -3293,7 +3558,7 @@ describe('holocraft bot config', function () {
     const memoryPath = tempMemoryPath()
     const requests = []
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => events.push(['chat', message])
     bot.players = {
       Alex: {
@@ -3315,7 +3580,7 @@ describe('holocraft bot config', function () {
       }
     })
 
-    bot.emit('chat', 'Alex', 'PokiMoki82719 meet me please')
+    bot.emit('chat', 'Alex', 'TestBot123 meet me please')
     await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
@@ -3335,7 +3600,7 @@ describe('holocraft bot config', function () {
     const events = []
     const requests = []
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => events.push(['chat', message])
     bot.players = {
       Alex: {
@@ -3357,7 +3622,7 @@ describe('holocraft bot config', function () {
       }
     })
 
-    bot.emit('chat', 'Alex', 'PokiMoki82719, please meet me in spawn')
+    bot.emit('chat', 'Alex', 'TestBot123, please meet me in spawn')
     await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
@@ -3375,7 +3640,7 @@ describe('holocraft bot config', function () {
     const events = []
     const requests = []
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => events.push(['chat', message])
     bot.whisper = (username, message) => events.push(['whisper', username, message])
 
@@ -3403,7 +3668,7 @@ describe('holocraft bot config', function () {
     const events = []
     const requests = []
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => events.push(['chat', message])
     bot.whisper = (username, message) => events.push(['whisper', username, message])
 
@@ -3414,8 +3679,8 @@ describe('holocraft bot config', function () {
       }
     })
 
-    bot.emit('whisper', 'Cat2246', 'Hi PokiMoki82719, how are you?')
-    bot.emit('chat', 'Cat2246', 'me] Hi PokiMoki82719, how are you?')
+    bot.emit('whisper', 'Cat2246', 'Hi TestBot123, how are you?')
+    bot.emit('chat', 'Cat2246', 'me] Hi TestBot123, how are you?')
     await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
@@ -3429,7 +3694,7 @@ describe('holocraft bot config', function () {
     const events = []
     const requests = []
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => events.push(['chat', message])
     bot.whisper = (username, message) => events.push(['whisper', username, message])
 
@@ -3441,7 +3706,7 @@ describe('holocraft bot config', function () {
       agentInstructions: 'Be concise.'
     })
 
-    bot.emit('chat', 'Alex', 'PokiMoki82719 can you help?')
+    bot.emit('chat', 'Alex', 'TestBot123 can you help?')
     await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
@@ -3456,7 +3721,7 @@ describe('holocraft bot config', function () {
     const events = []
     const requests = []
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => events.push(['chat', message])
 
     attachAiChat(bot, {
@@ -3468,14 +3733,14 @@ describe('holocraft bot config', function () {
       }
     })
 
-    bot.emit('message', '[Γούρας Χουμπούδς] [ExeのMod] Sameko_Saba: @PokiMoki82719 how are you ?')
+    bot.emit('message', '[Γούρας Χουμπούδς] [ExeのMod] Sameko_Saba: @TestBot123 how are you ?')
     await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
     assert.strictEqual(requests.length, 1)
     assert.strictEqual(requests[0].channel, 'public')
     assert.strictEqual(requests[0].username, 'Sameko_Saba')
-    assert.strictEqual(requests[0].message, '@PokiMoki82719 how are you ?')
+    assert.strictEqual(requests[0].message, '@TestBot123 how are you ?')
     assert.deepStrictEqual(events, [['chat', '@Sameko_Saba Doing fine. Somehow.']])
   })
 
@@ -3484,7 +3749,7 @@ describe('holocraft bot config', function () {
     const events = []
     const requests = []
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => events.push(['chat', message])
 
     attachAiChat(bot, {
@@ -3496,13 +3761,13 @@ describe('holocraft bot config', function () {
       }
     })
 
-    bot.emit('message', '[Rice] Alex: PokiMoki82719 can you help?')
-    bot.emit('chat', 'Alex', 'PokiMoki82719 can you help?')
+    bot.emit('message', '[Rice] Alex: TestBot123 can you help?')
+    bot.emit('chat', 'Alex', 'TestBot123 can you help?')
     await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
     assert.deepStrictEqual(requests.map(request => request.message), [
-      'PokiMoki82719 can you help?'
+      'TestBot123 can you help?'
     ])
     assert.deepStrictEqual(events, [['chat', '@Alex reply 1']])
   })
@@ -3512,7 +3777,7 @@ describe('holocraft bot config', function () {
     const events = []
     const requests = []
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => events.push(['chat', message])
 
     attachAiChat(bot, {
@@ -3524,18 +3789,18 @@ describe('holocraft bot config', function () {
       }
     })
 
-    bot.emit('chat', 'Alex', 'PokiMoki can you help?')
-    bot.emit('chat', 'Alex', '@PokiMoki what now?')
-    bot.emit('chat', 'Alex', 'PokiMoki82719 hello')
-    bot.emit('chat', 'Alex', '@PokiMoki81719 typo summon')
+    bot.emit('chat', 'Alex', 'TestBot can you help?')
+    bot.emit('chat', 'Alex', '@TestBot what now?')
+    bot.emit('chat', 'Alex', 'TestBot123 hello')
+    bot.emit('chat', 'Alex', '@TestBot122 typo summon')
     await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
     assert.deepStrictEqual(requests.map(request => request.message), [
-      'PokiMoki can you help?',
-      '@PokiMoki what now?',
-      'PokiMoki82719 hello',
-      '@PokiMoki81719 typo summon'
+      'TestBot can you help?',
+      '@TestBot what now?',
+      'TestBot123 hello',
+      '@TestBot122 typo summon'
     ])
     assert.deepStrictEqual(events, [
       ['chat', '@Alex heard 1'],
@@ -3549,7 +3814,7 @@ describe('holocraft bot config', function () {
     const { attachAiChat } = require('../bot')
     const events = []
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => events.push(['chat', message])
     bot.whisper = (username, message) => events.push(['whisper', username, message])
 
@@ -3560,7 +3825,7 @@ describe('holocraft bot config', function () {
     })
 
     bot.emit('chat', 'Alex', 'hello everyone')
-    bot.emit('chat', 'PokiMoki82719', 'PokiMoki82719 status')
+    bot.emit('chat', 'TestBot123', 'TestBot123 status')
     await new Promise(resolve => setImmediate(resolve))
 
     assert.deepStrictEqual(events, [])
@@ -3571,7 +3836,7 @@ describe('holocraft bot config', function () {
     const events = []
     let codexCalls = 0
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => events.push(['chat', message])
     bot.whisper = (username, message) => events.push(['whisper', username, message])
 
@@ -3582,7 +3847,7 @@ describe('holocraft bot config', function () {
       }
     })
 
-    bot.emit('chat', 'Joined', 'PokiMoki82719')
+    bot.emit('chat', 'Joined', 'TestBot123')
     await new Promise(resolve => setImmediate(resolve))
 
     assert.strictEqual(codexCalls, 0)
@@ -3596,7 +3861,7 @@ describe('holocraft bot config', function () {
     const bot = new EventEmitter()
     const err = new Error('spawn codex ENOENT')
     err.stderr = 'codex was not found'
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => events.push(['chat', message])
     bot.whisper = (username, message) => events.push(['whisper', username, message])
 
@@ -7684,7 +7949,7 @@ describe('holocraft bot config', function () {
     const started = []
     let plannerState
 
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.health = 20
     bot.food = 18
     bot.time = { isDay: true, timeOfDay: 1000 }
@@ -7721,7 +7986,7 @@ describe('holocraft bot config', function () {
     })
 
     assert.strictEqual(started[0], 1)
-    assert.strictEqual(plannerState.bot.username, 'PokiMoki82719')
+    assert.strictEqual(plannerState.bot.username, 'TestBot123')
     assert.strictEqual(plannerState.players[0].username, 'Steve')
     assert.strictEqual(plannerState.players[0].visible, true)
     assert.strictEqual(plannerState.inventory.items[0].name, 'oak_log')
@@ -7732,7 +7997,7 @@ describe('holocraft bot config', function () {
   it('does not run the idle NPC planner while the bot is busy', async () => {
     const { runAiNpcCycle } = require('../bot')
     const bot = new EventEmitter()
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
 
     const result = await runAiNpcCycle(bot, {
       automationManager: {
@@ -7760,7 +8025,7 @@ describe('holocraft bot config', function () {
     const { runAiNpcCycle } = require('../bot')
     const bot = new EventEmitter()
     const followed = []
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.players = {
       Alex: {
         username: 'Alex',
@@ -7798,7 +8063,7 @@ describe('holocraft bot config', function () {
     const { runAiNpcCycle } = require('../bot')
     const bot = new EventEmitter()
     const messages = []
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => messages.push(message)
 
     const result = await runAiNpcCycle(bot, {
@@ -7824,7 +8089,7 @@ describe('holocraft bot config', function () {
     const { runAiNpcCycle } = require('../bot')
     const bot = new EventEmitter()
     const messages = []
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => messages.push(message)
 
     const result = await runAiNpcCycle(bot, {
@@ -7850,7 +8115,7 @@ describe('holocraft bot config', function () {
     const { runAiNpcCycle } = require('../bot')
     const bot = new EventEmitter()
     const messages = []
-    bot.username = 'PokiMoki82719'
+    bot.username = 'TestBot123'
     bot.chat = message => messages.push(message)
 
     const result = await runAiNpcCycle(bot, {

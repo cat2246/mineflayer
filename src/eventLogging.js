@@ -1,11 +1,10 @@
 const {
-  DEFAULT_HOST,
   PHYSICS_ENABLE_DELAY_MS,
   PLAYER_GREETING_COOLDOWN_MS,
   PLAYER_GREETING_STARTUP_DELAY_MS
 } = require('./config')
 const { createDebugLogger } = require('./debugLogger')
-const { joinSurvivalWorld, loginToServer } = require('./survival')
+const { attachServerLoginPromptHandler, joinSurvivalWorld } = require('./survival')
 const { sleep } = require('./time')
 const { startViewer } = require('./viewer')
 const { summarizeWindowItems } = require('./windows')
@@ -40,7 +39,6 @@ async function enablePhysicsAfterDelay (bot, wait, debugLog, spawnCount) {
 
 function attachEventLogging (bot, options = {}) {
   const joinWorld = options.joinSurvivalWorld || joinSurvivalWorld
-  const loginServer = options.loginToServer || loginToServer
   const showViewer = options.startViewer || startViewer
   const wait = options.sleep || sleep
   const debugLog = options.debugLog || createDebugLogger()
@@ -56,6 +54,15 @@ function attachEventLogging (bot, options = {}) {
   const knownPlayers = new Set(Object.keys(bot.players || {}).filter(Boolean))
   const queuedGreetings = []
   const queuedGreetingUsernames = new Set()
+  const serverLabel = options.serverLabel || 'selected server'
+
+  attachServerLoginPromptHandler(bot, {
+    commandDelayMs: options.serverLoginCommandDelayMs,
+    debugLog,
+    loginOnSpawn: true,
+    serverLoginPassword: options.serverLoginPassword,
+    sleep: wait
+  })
 
   function rememberCurrentPlayers () {
     for (const username of Object.keys(bot.players || {})) {
@@ -145,7 +152,7 @@ function attachEventLogging (bot, options = {}) {
 
   bot.on('spawn', async () => {
     spawnCount++
-    console.log(`Spawned on ${DEFAULT_HOST}`)
+    console.log(`Spawned on ${serverLabel}`)
     debugLog('spawn', {
       spawnCount,
       username: bot.username,
@@ -156,17 +163,6 @@ function attachEventLogging (bot, options = {}) {
 
     if (spawnCount === 1) {
       await showViewer(bot)
-
-      try {
-        const sentLogin = await loginServer(bot)
-        if (sentLogin !== false) {
-          console.log('Sent server login command')
-          debugLog('command.sent', { command: '/login ***' })
-        }
-      } catch (err) {
-        console.log('Could not send server login command:', err.message)
-        debugLog('command.error', { command: '/login ***', error: err.message })
-      }
 
       try {
         enablePhysics(bot, debugLog, spawnCount)

@@ -92,18 +92,26 @@ function attachReconnectHandler (bot, options = {}) {
   })
 }
 
-function createBot (options = buildBotOptions()) {
+function createBot (options = buildBotOptions(), runtimeOptions = {}) {
   const debugLog = createDebugLogger()
+  const mineflayerOptions = { ...options }
+  delete mineflayerOptions.serverLabel
+  delete mineflayerOptions.serverLoginPassword
+  delete mineflayerOptions.logTerminal
   debugLog('bot.start', {
-    host: options.host,
-    port: options.port,
-    username: options.username,
-    version: options.version
+    host: mineflayerOptions.host,
+    port: mineflayerOptions.port,
+    username: mineflayerOptions.username,
+    version: mineflayerOptions.version
   })
-  const rawBot = mineflayer.createBot(options)
+  const rawBot = mineflayer.createBot(mineflayerOptions)
   rawBot.loadPlugin(pathfinder)
   loadPvpPlugin(rawBot)
-  const bot = attachEventLogging(rawBot, { debugLog })
+  const bot = attachEventLogging(rawBot, {
+    debugLog,
+    serverLabel: runtimeOptions.serverLabel || options.serverLabel || `${mineflayerOptions.host}:${mineflayerOptions.port}`,
+    serverLoginPassword: runtimeOptions.serverLoginPassword || options.serverLoginPassword
+  })
   bot.once('spawn', () => {
     const movements = configureConservativeMovements(new Movements(bot))
     bot.pathfinder.setMovements(movements)
@@ -121,24 +129,31 @@ function createBot (options = buildBotOptions()) {
   attachErrorLogMonitor(bot, { debugLog })
   attachReconnectHandler(bot, {
     debugLog,
-    reconnect: () => createBot(options)
+    reconnect: () => createBot(options, runtimeOptions)
   })
   attachShutdownHandlers(bot)
   return bot
 }
 
-function start () {
-  try {
-    const logTerminal = startLogTerminal()
-    const bot = createBot()
-    if (bot) bot.__logTerminal = logTerminal
-    return bot
-  } catch (err) {
+function start (options = {}) {
+  const logTerminal = startLogTerminal()
+  const { startInteractiveMenu } = require('./startMenu')
+  return startInteractiveMenu({
+    ...options,
+    createBot: (botOptions, runtimeOptions = {}) => {
+      const bot = createBot(botOptions, {
+        ...runtimeOptions,
+        logTerminal
+      })
+      if (bot) bot.__logTerminal = logTerminal
+      return bot
+    },
+    logTerminal
+  }).catch(err => {
     console.error(err.message)
-    console.error('Usage: node bot.js <microsoft-account-email-or-identifier>')
     process.exitCode = 1
     return null
-  }
+  })
 }
 
 module.exports = {

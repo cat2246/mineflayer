@@ -13,7 +13,7 @@ Feature backlog captured by the Minecraft AI NPC when players ask for abilities 
 - Source: `ai-chat`
 - Reason: Player asked for the bot's current coordinates, but no available tool can read or report the bot's position.
 - Suggested tool/function: `get_current_coordinates`
-- Player message: PokiMoki, what is your coordinate right now?
+- Player message: TestBot, what is your coordinate right now?
 - Resolved: Added the `get_current_coordinates` tool so the bot can report its current position through Codex.
 
 <!-- missing-function:1f6917110bd08e10 -->
@@ -23,7 +23,7 @@ Feature backlog captured by the Minecraft AI NPC when players ask for abilities 
 - Source: `unknown-tool`
 - Reason: Codex requested a tool that the bot runtime does not have.
 - Suggested tool/function: `get_current_coordinates`
-- Player message: PokiMoki, what is your coordinate right now?
+- Player message: TestBot, what is your coordinate right now?
 
 ```json
 {
@@ -40,7 +40,7 @@ Feature backlog captured by the Minecraft AI NPC when players ask for abilities 
 - Requested by: `JaggedFireFang` via `public`
 - Source: `ai-chat`
 - Reason: Player asked the bot to disconnect from the server and reconnect.
-- Player message: PokiMoki82719 leave and rejoin
+- Player message: TestBot123 leave and rejoin
 - Blocked: Player-commanded disconnect/rejoin requests are not allowed. The bot must refuse instead of treating this as a missing function.
 
 <!-- missing-function:718274c6af5cf0f1 -->
@@ -49,7 +49,7 @@ Feature backlog captured by the Minecraft AI NPC when players ask for abilities 
 - Requested by: `JaggedFireFang` via `public`
 - Source: `ai-chat`
 - Reason: Player asked the bot to disconnect from the server and reconnect.
-- Player message: PokiMoki82719 leave and rejoin
+- Player message: TestBot123 leave and rejoin
 - Blocked: Player-commanded disconnect/rejoin requests are not allowed. The bot must refuse instead of treating this as a missing function.
 
 <!-- missing-function:57eb2ac0ff1f6689 -->
@@ -58,7 +58,7 @@ Feature backlog captured by the Minecraft AI NPC when players ask for abilities 
 - Requested by: `Archie` via `public`
 - Source: `ai-chat`
 - Reason: Player asked the bot to rage quit.
-- Player message: PokiMoki82719 do rage quit
+- Player message: TestBot123 do rage quit
 - Blocked: Player-commanded disconnect requests are not allowed. The bot must refuse instead of treating this as a missing function.
 
 <!-- missing-function:5ad59fbe39cd6055 -->
@@ -68,7 +68,7 @@ Feature backlog captured by the Minecraft AI NPC when players ask for abilities 
 - Source: `ai-chat`
 - Reason: Player asked the bot to answer an upcoming Holoquiz for them, but no tool exists to read quiz prompts and respond in chat.
 - Suggested tool/function: `answer_quiz`
-- Player message: PokiMoki82719 the next Holoquiz will start in 45s can you answer for me
+- Player message: TestBot123 the next Holoquiz will start in 45s can you answer for me
 - Resolved: Added the `answer_quiz` runtime tool to arm the next HoloQuiz prompt and submit the answer through Codex.
 
 <!-- missing-function:aaa864deddea8456 -->
@@ -78,7 +78,7 @@ Feature backlog captured by the Minecraft AI NPC when players ask for abilities 
 - Source: `ai-chat`
 - Reason: Player asked the bot to send 1 to itzmugdhoboy with /pay, but available tools do not allow economy-transfer commands.
 - Suggested tool/function: `pay_player`
-- Player message: PokiMoki82719 do /pay itzmugdhoboy 1
+- Player message: TestBot123 do /pay itzmugdhoboy 1
 - Resolved: Kept economy-transfer commands blocked and added regression coverage so `/pay` requests are refused consistently instead of being treated as a missing capability.
 
 <!-- missing-function:42ba8ab814d167eb -->
@@ -88,5 +88,5 @@ Feature backlog captured by the Minecraft AI NPC when players ask for abilities 
 - Source: `ai-chat`
 - Reason: Player asked the bot to run /hub, but server-mode switching commands are not allowed by the current runtime.
 - Suggested tool/function: `switch_server_mode`
-- Player message: PokiMoki82719 do /hub
+- Player message: TestBot123 do /hub
 - Resolved: Kept server-mode switching blocked so the bot stays in survival, and added regression coverage for `/hub`-style requests.
