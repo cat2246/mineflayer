@@ -22,6 +22,7 @@ module.exports = {
   ...require('./logViewer'),
   ...require('./maintenanceAutomation'),
   ...require('./mining'),
+  ...require('./missingTools'),
   ...require('./nightSafety'),
   ...require('./npcLife'),
   ...require('./places'),

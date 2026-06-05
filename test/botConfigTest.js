@@ -3539,6 +3539,77 @@ describe('holocraft bot config', function () {
     assert(missing.includes('craft_item'))
   })
 
+  it('records structured missing tools with stable dedupe', () => {
+    const { recordMissingTool, readMissingTools } = require('../bot')
+    const missingToolsPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'missing-tools-')), 'missing-tools.json')
+    let now = 1000
+
+    const first = recordMissingTool({
+      capability: 'Mine ore safely',
+      desiredTool: 'mine_block_or_vein',
+      blockedGoal: 'Upgrade gear',
+      reason: 'Need iron for better gear.',
+      context: { inventory: ['stone_pickaxe'] },
+      priority: 'high'
+    }, { missingToolsPath, now: () => now })
+
+    now = 2000
+    const second = recordMissingTool({
+      capability: 'mine ore safely',
+      desiredTool: 'mine_block_or_vein',
+      blockedGoal: 'Upgrade gear',
+      reason: 'Need iron again.',
+      context: { inventory: ['stone_pickaxe', 'torch'] },
+      priority: 'medium'
+    }, { missingToolsPath, now: () => now })
+
+    const records = readMissingTools({ missingToolsPath })
+
+    assert.strictEqual(first.recorded, true)
+    assert.strictEqual(second.recorded, false)
+    assert.strictEqual(records.length, 1)
+    assert.strictEqual(records[0].id, 'mine-ore-safely-mine-block-or-vein-upgrade-gear')
+    assert.strictEqual(records[0].capability, 'Mine ore safely')
+    assert.strictEqual(records[0].desiredTool, 'mine_block_or_vein')
+    assert.strictEqual(records[0].blockedGoal, 'Upgrade gear')
+    assert.strictEqual(records[0].priority, 'high')
+    assert.strictEqual(records[0].count, 2)
+    assert.strictEqual(records[0].firstSeenAt, 1000)
+    assert.strictEqual(records[0].lastSeenAt, 2000)
+    assert.strictEqual(records[0].examples.length, 2)
+  })
+
+  it('limits relevant missing tool summaries for prompts', () => {
+    const { recordMissingTool, summarizeMissingTools } = require('../bot')
+    const missingToolsPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'missing-tools-')), 'missing-tools.json')
+
+    recordMissingTool({
+      capability: 'Mine ore safely',
+      desiredTool: 'mine_block_or_vein',
+      blockedGoal: 'Upgrade gear',
+      reason: 'Need iron.',
+      priority: 'high'
+    }, { missingToolsPath, now: () => 1000 })
+
+    recordMissingTool({
+      capability: 'Cook food',
+      desiredTool: 'cook_item',
+      blockedGoal: 'Build food supply',
+      reason: 'Need cooked food.',
+      priority: 'medium'
+    }, { missingToolsPath, now: () => 2000 })
+
+    const summary = summarizeMissingTools({
+      missingToolsPath,
+      currentGoal: 'Upgrade gear',
+      limit: 1
+    })
+
+    assert.deepStrictEqual(summary, [
+      'Mine ore safely blocked "Upgrade gear"; desired tool `mine_block_or_vein`; seen 1 time.'
+    ])
+  })
+
   it('records unknown Codex tools as missing bot functions', async () => {
     const { attachAiChat } = require('../bot')
     const events = []
