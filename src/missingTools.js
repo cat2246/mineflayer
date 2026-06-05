@@ -56,39 +56,71 @@ function readJsonArray (filePath, fileSystem = fs) {
   }
 }
 
+function objectRecord (entry) {
+  return entry && typeof entry === 'object' && !Array.isArray(entry) ? entry : {}
+}
+
+function numericValue (value) {
+  if (value instanceof Date) {
+    const timestamp = value.getTime()
+    return Number.isFinite(timestamp) ? timestamp : null
+  }
+
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null
+  }
+
+  if (typeof value === 'string' && value.trim() !== '') {
+    const timestamp = Number(value)
+    return Number.isFinite(timestamp) ? timestamp : null
+  }
+
+  return null
+}
+
+function numericTimestamp (value, fallback) {
+  return numericValue(value) ?? fallback
+}
+
+function positiveCount (value) {
+  const count = Number.parseInt(value ?? 1, 10)
+  return Number.isFinite(count) && count >= 1 ? count : 1
+}
+
 function writeJsonArray (filePath, records, fileSystem = fs) {
   fileSystem.mkdirSync(path.dirname(filePath), { recursive: true })
   fileSystem.writeFileSync(filePath, `${JSON.stringify(records, null, 2)}\n`)
 }
 
 function normalizeMissingToolRecord (entry, options = {}) {
-  const now = options.now?.() || Date.now()
-  const capability = compactText(entry.capability, 'Unknown missing capability', 120)
-  const desiredTool = compactText(entry.desiredTool || entry.suggestedTool || entry.tool, '', 120)
-  const blockedGoal = compactText(entry.blockedGoal || entry.goal, 'Unspecified goal', 160)
-  const reason = compactText(entry.reason, 'No reason captured', 300)
-  const priority = normalizePriority(entry.priority)
-  const context = entry.context && typeof entry.context === 'object' ? entry.context : {}
+  const record = objectRecord(entry)
+  const now = numericTimestamp(options.now?.(), Date.now())
+  const capability = compactText(record.capability, 'Unknown missing capability', 120)
+  const desiredTool = compactText(record.desiredTool ?? record.suggestedTool ?? record.tool, '', 120)
+  const blockedGoal = compactText(record.blockedGoal ?? record.goal, 'Unspecified goal', 160)
+  const reason = compactText(record.reason, 'No reason captured', 300)
+  const priority = normalizePriority(record.priority)
+  const context = objectRecord(record.context)
   const example = {
-    at: entry.at || now,
+    at: numericTimestamp(record.at, now),
     reason,
     context
   }
 
   return {
     id: missingToolId({ capability, desiredTool, blockedGoal }),
-    status: compactText(entry.status, 'open', 40),
+    status: compactText(record.status, 'open', 40),
     capability,
     desiredTool,
     blockedGoal,
     reason,
     priority,
-    count: Math.max(1, Number.parseInt(entry.count || 1, 10)),
-    firstSeenAt: entry.firstSeenAt || now,
-    lastSeenAt: entry.lastSeenAt || now,
-    suggestedInputs: Array.isArray(entry.suggestedInputs) ? entry.suggestedInputs.slice(0, 8) : [],
-    suggestedResult: compactText(entry.suggestedResult, '', 200),
-    examples: Array.isArray(entry.examples) ? entry.examples.slice(-5) : [example]
+    count: positiveCount(record.count),
+    firstSeenAt: numericTimestamp(record.firstSeenAt, now),
+    lastSeenAt: numericTimestamp(record.lastSeenAt, now),
+    suggestedInputs: Array.isArray(record.suggestedInputs) ? record.suggestedInputs.slice(0, 8) : [],
+    suggestedResult: compactText(record.suggestedResult, '', 200),
+    examples: Array.isArray(record.examples) ? record.examples.slice(-5) : [example]
   }
 }
 
@@ -107,8 +139,14 @@ function mergeMissingToolRecord (existing, incoming) {
     reason: incoming.reason || existing.reason,
     priority,
     count: Math.max(1, existing.count || 1) + Math.max(1, incoming.count || 1),
-    firstSeenAt: Math.min(existing.firstSeenAt || incoming.firstSeenAt, incoming.firstSeenAt || existing.firstSeenAt),
-    lastSeenAt: Math.max(existing.lastSeenAt || incoming.lastSeenAt, incoming.lastSeenAt || existing.lastSeenAt),
+    firstSeenAt: Math.min(
+      numericTimestamp(existing.firstSeenAt, incoming.firstSeenAt),
+      numericTimestamp(incoming.firstSeenAt, existing.firstSeenAt)
+    ),
+    lastSeenAt: Math.max(
+      numericTimestamp(existing.lastSeenAt, incoming.lastSeenAt),
+      numericTimestamp(incoming.lastSeenAt, existing.lastSeenAt)
+    ),
     suggestedInputs: incoming.suggestedInputs.length ? incoming.suggestedInputs : existing.suggestedInputs,
     suggestedResult: incoming.suggestedResult || existing.suggestedResult,
     examples

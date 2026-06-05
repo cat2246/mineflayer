@@ -3610,6 +3610,37 @@ describe('holocraft bot config', function () {
     ])
   })
 
+  it('normalizes malformed missing tool records safely', () => {
+    const { readMissingTools } = require('../bot')
+    const missingToolsPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'missing-tools-')), 'missing-tools.json')
+
+    fs.writeFileSync(missingToolsPath, JSON.stringify([
+      null,
+      'not-an-object',
+      {
+        capability: 'Mine ore safely',
+        desiredTool: 'mine_block_or_vein',
+        blockedGoal: 'Upgrade gear',
+        reason: 'Need iron.',
+        priority: 'high',
+        count: 'bad',
+        firstSeenAt: 0,
+        lastSeenAt: 0,
+        examples: [{ at: 0, reason: 'Need iron.', context: {} }]
+      }
+    ]))
+
+    const records = readMissingTools({ missingToolsPath, now: () => 5000 })
+
+    assert.strictEqual(records.length, 3)
+    assert.strictEqual(records[0].capability, 'Mine ore safely')
+    assert.strictEqual(records[0].count, 1)
+    assert.strictEqual(records[0].firstSeenAt, 0)
+    assert.strictEqual(records[0].lastSeenAt, 0)
+    assert.strictEqual(records[0].examples[0].at, 0)
+    assert(records.some(record => record.capability === 'Unknown missing capability'))
+  })
+
   it('records unknown Codex tools as missing bot functions', async () => {
     const { attachAiChat } = require('../bot')
     const events = []
