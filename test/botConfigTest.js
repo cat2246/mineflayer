@@ -3719,6 +3719,41 @@ describe('holocraft bot config', function () {
     ])
   })
 
+  it('summarizes only the highest priority missing tools for prompt use', () => {
+    const { recordMissingTool, summarizeMissingTools } = require('../bot')
+    const missingToolsPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'missing-tools-')), 'missing-tools.json')
+
+    for (let i = 0; i < 6; i++) {
+      recordMissingTool({
+        capability: `Capability ${i}`,
+        desiredTool: `tool_${i}`,
+        blockedGoal: 'Upgrade gear',
+        reason: `Reason ${i}`,
+        priority: i === 5 ? 'high' : 'medium'
+      }, { missingToolsPath, now: () => 1000 + i })
+    }
+
+    for (let i = 0; i < 4; i++) {
+      recordMissingTool({
+        capability: 'Repeated medium capability',
+        desiredTool: 'repeated_medium_tool',
+        blockedGoal: 'Upgrade gear',
+        reason: `Repeated reason ${i}`,
+        priority: 'medium'
+      }, { missingToolsPath, now: () => 2000 + i })
+    }
+
+    const summary = summarizeMissingTools({
+      missingToolsPath,
+      currentGoal: 'Upgrade gear',
+      limit: 3
+    })
+
+    assert.strictEqual(summary.length, 3)
+    assert.match(summary[0], /Capability 5/)
+    assert(summary.every(line => line.includes('Upgrade gear')))
+  })
+
   it('normalizes malformed missing tool records safely', () => {
     const { readMissingTools } = require('../bot')
     const missingToolsPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'missing-tools-')), 'missing-tools.json')
