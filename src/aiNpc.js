@@ -7,6 +7,7 @@ const {
   executeAgentTool
 } = require('./aiChat')
 const { recordMissingFunction } = require('./issueRecorder')
+const { resolveBotMemoryPaths } = require('./botMemory')
 
 const DEFAULT_AI_NPC_MAX_BUFFER = 1024 * 1024
 const DEFAULT_AI_NPC_CHAT_MAX_LENGTH = 160
@@ -143,7 +144,7 @@ function createAiNpcPrompt (state) {
     '{"action":"follow_player","player":"Steve","reason":"short reason"}',
     '{"action":"run_server_command","command":"/spawn","reason":"short reason"}',
     '{"action":"chat","message":"short chat message","reason":"short reason"}',
-    '{"action":"record_missing_function","capability":"craft items","reason":"short reason"}',
+    '{"action":"record_missing_tool","capability":"craft items","desiredTool":"craft_item","blockedGoal":"Build shelter","reason":"short reason"}',
     '',
     'Rules:',
     '- Choose noop if the state is unsafe, boring, unclear, or already busy.',
@@ -260,9 +261,11 @@ function parseAiNpcInstruction (response) {
     instruction.command = cleanShortText(parsed.command, 120)
   } else if (action === 'chat') {
     instruction.message = cleanShortText(parsed.message, DEFAULT_AI_NPC_CHAT_MAX_LENGTH)
-  } else if (action === 'record_missing_function') {
+  } else if (action === 'record_missing_function' || action === 'record_missing_tool') {
     instruction.capability = cleanShortText(parsed.capability || parsed.function || parsed.name, 80)
-    instruction.suggestedTool = cleanShortText(parsed.suggestedTool || parsed.suggested_tool || parsed.tool, 80)
+    instruction.suggestedTool = cleanShortText(parsed.suggestedTool || parsed.suggested_tool || parsed.desiredTool || parsed.desired_tool || parsed.tool, 80)
+    instruction.blockedGoal = cleanShortText(parsed.blockedGoal || parsed.blocked_goal || parsed.goal, 120)
+    instruction.priority = cleanShortText(parsed.priority, 20)
   } else if (action !== 'noop') {
     throw new Error(`Idle NPC planner returned unsupported action: ${action}`)
   }
@@ -396,23 +399,30 @@ async function executeAiNpcInstruction (bot, instruction, options = {}) {
     return { ok: true, action, message: instruction.message }
   }
 
-  if (action === 'record_missing_function') {
+  if (action === 'record_missing_function' || action === 'record_missing_tool') {
+    const memoryPaths = resolveBotMemoryPaths(bot, options)
     const record = recordMissingFunction({
       capability: instruction.capability,
       reason: instruction.reason || 'Idle planner needed a capability the bot does not have yet.',
       suggestedTool: instruction.suggestedTool,
+      blockedGoal: instruction.blockedGoal,
+      priority: instruction.priority,
       playerName: 'idle-planner',
       channel: 'npc',
       requestMessage: instruction.reason,
       source: 'ai-npc'
-    }, options)
+    }, {
+      ...options,
+      missingToolsPath: options.missingToolsPath || memoryPaths.missingToolsPath
+    })
 
     return {
       ok: true,
       action,
       capability: record.capability,
       recorded: record.recorded,
-      path: record.path
+      path: record.path,
+      missingTool: record.missingTool
     }
   }
 

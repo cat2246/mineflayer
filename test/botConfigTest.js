@@ -3539,6 +3539,60 @@ describe('holocraft bot config', function () {
     assert(missing.includes('craft_item'))
   })
 
+  it('records structured missing tools from Codex tool calls', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const missingFunctionsPath = tempMissingFunctionsPath()
+    const botMemoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-memory-'))
+    const sharedMissingToolsPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'shared-missing-')), 'missing-tools.json')
+    const bot = new EventEmitter()
+    bot.username = 'LifeBot'
+    bot.chat = message => events.push(['chat', message])
+
+    attachAiChat(bot, {
+      memoryEnabled: false,
+      missingFunctionsPath,
+      botMemoryRoot,
+      sharedMissingToolsPath,
+      now: () => new Date('2026-06-02T12:00:00.000Z'),
+      runCodex: async request => {
+        if (request.toolResult) {
+          assert.strictEqual(request.toolResult.tool, 'record_missing_function')
+          return 'I wrote that down for future upgrades.'
+        }
+        return JSON.stringify({
+          tool: 'record_missing_tool',
+          args: {
+            capability: 'mine ore safely',
+            desiredTool: 'mine_block_or_vein',
+            blockedGoal: 'Upgrade gear',
+            reason: 'The bot needs iron but has no mining tool.',
+            priority: 'high'
+          }
+        })
+      }
+    })
+
+    bot.emit('chat', 'Steve', 'LifeBot upgrade your gear')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    const perBotPath = path.join(botMemoryRoot, 'lifebot', 'missing-tools.json')
+    const perBot = JSON.parse(fs.readFileSync(perBotPath, 'utf8'))
+    const shared = JSON.parse(fs.readFileSync(sharedMissingToolsPath, 'utf8'))
+
+    assert.deepStrictEqual(events, [
+      ['chat', '@Steve I wrote that down for future upgrades.']
+    ])
+    assert.strictEqual(perBot.length, 1)
+    assert.strictEqual(shared.length, 1)
+    assert.strictEqual(perBot[0].capability, 'mine ore safely')
+    assert.strictEqual(perBot[0].desiredTool, 'mine_block_or_vein')
+    assert.strictEqual(perBot[0].blockedGoal, 'Upgrade gear')
+    assert.strictEqual(perBot[0].priority, 'high')
+    assert.match(fs.readFileSync(missingFunctionsPath, 'utf8'), /mine ore safely/)
+  })
+
   it('records structured missing tools with stable dedupe', () => {
     const { recordMissingTool, readMissingTools } = require('../bot')
     const missingToolsPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'missing-tools-')), 'missing-tools.json')
@@ -3669,6 +3723,39 @@ describe('holocraft bot config', function () {
     ])
     assert(missing.includes('Unknown tool: craft_item'))
     assert(missing.includes('oak_door'))
+  })
+
+  it('records unknown Codex tools into structured missing tool backlog', async () => {
+    const { attachAiChat } = require('../bot')
+    const missingFunctionsPath = tempMissingFunctionsPath()
+    const botMemoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-memory-'))
+    const sharedMissingToolsPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'shared-missing-')), 'missing-tools.json')
+    const bot = new EventEmitter()
+    bot.username = 'LifeBot'
+    bot.chat = () => {}
+
+    attachAiChat(bot, {
+      memoryEnabled: false,
+      missingFunctionsPath,
+      botMemoryRoot,
+      sharedMissingToolsPath,
+      runCodex: async request => {
+        if (request.toolResult) return 'I cannot do that yet.'
+        return JSON.stringify({
+          tool: 'mine_block_or_vein',
+          args: { blockType: 'iron_ore' }
+        })
+      }
+    })
+
+    bot.emit('chat', 'Steve', 'LifeBot mine iron')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    const records = JSON.parse(fs.readFileSync(path.join(botMemoryRoot, 'lifebot', 'missing-tools.json'), 'utf8'))
+    assert.strictEqual(records.length, 1)
+    assert.strictEqual(records[0].desiredTool, 'mine_block_or_vein')
+    assert.strictEqual(records[0].capability, 'Unknown tool: mine_block_or_vein')
   })
 
   it('reports current coordinates through a Codex tool call', async () => {
@@ -8426,6 +8513,49 @@ describe('holocraft bot config', function () {
     assert.strictEqual(plannerState.inventory.items[0].name, 'oak_log')
     assert.strictEqual(result.instruction.action, 'start_automation')
     assert.strictEqual(result.execution.startedAutomation, 'Mining')
+  })
+
+  it('records AI NPC missing tools into per-bot memory', async () => {
+    const { runAiNpcCycle } = require('../bot')
+    const missingFunctionsPath = tempMissingFunctionsPath()
+    const botMemoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-memory-'))
+    const sharedMissingToolsPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'shared-missing-')), 'missing-tools.json')
+    const bot = new EventEmitter()
+    bot.username = 'LifeBot'
+    bot.food = 20
+    bot.health = 20
+    bot.time = { isDay: true, timeOfDay: 1000 }
+    bot.players = {}
+
+    const result = await runAiNpcCycle(bot, {
+      missingFunctionsPath,
+      botMemoryRoot,
+      sharedMissingToolsPath,
+      automationManager: {
+        isIdle: () => true,
+        list: () => [],
+        getStatus: () => ({ active: false })
+      },
+      followController: {
+        isIdle: () => true,
+        getStatus: () => ({ active: false })
+      },
+      runPlanner: async () => JSON.stringify({
+        action: 'record_missing_tool',
+        capability: 'mine ore safely',
+        desiredTool: 'mine_block_or_vein',
+        blockedGoal: 'Upgrade gear',
+        reason: 'I need iron gear but cannot mine ore yet.',
+        priority: 'high'
+      })
+    })
+
+    const records = JSON.parse(fs.readFileSync(path.join(botMemoryRoot, 'lifebot', 'missing-tools.json'), 'utf8'))
+
+    assert.strictEqual(result.execution.ok, true)
+    assert.strictEqual(records.length, 1)
+    assert.strictEqual(records[0].capability, 'mine ore safely')
+    assert.strictEqual(records[0].desiredTool, 'mine_block_or_vein')
   })
 
   it('does not run the idle NPC planner while the bot is busy', async () => {

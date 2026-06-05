@@ -4,6 +4,7 @@ const path = require('path')
 const { spawn } = require('child_process')
 const { goals: { GoalNear } } = require('mineflayer-pathfinder')
 const { recordMissingFunction } = require('./issueRecorder')
+const { resolveBotMemoryPaths } = require('./botMemory')
 const { sleep } = require('./time')
 
 const DEFAULT_CODEX_COMMAND = 'codex'
@@ -179,7 +180,7 @@ function defaultToolsText () {
     '{"tool":"run_server_command","args":{"command":"/balance"}}',
     '```',
     '',
-    '### record_missing_function',
+    '### record_missing_tool',
     '',
     'Use when a player asks the bot to do something useful but no available tool/function can do it yet.',
     '',
@@ -188,6 +189,8 @@ function defaultToolsText () {
     '- `capability`: Short name for the missing function, such as `craft wooden doors`.',
     '- `reason`: Why the function is needed.',
     '- `suggestedTool`: Optional future tool name, such as `craft_item`.',
+    '- `blockedGoal`: Optional player goal this missing tool blocks.',
+    '- `priority`: Optional backlog priority: `low`, `medium`, or `high`.',
     '',
     'Behavior:',
     '',
@@ -197,7 +200,7 @@ function defaultToolsText () {
     'Example:',
     '',
     '```json',
-    '{"tool":"record_missing_function","args":{"capability":"craft wooden doors","reason":"Player asked the bot to craft a door from wood.","suggestedTool":"craft_item"}}',
+    '{"tool":"record_missing_tool","args":{"capability":"craft wooden doors","reason":"Player asked the bot to craft a door from wood.","suggestedTool":"craft_item","blockedGoal":"Help player build a house"}}',
     '```',
     '',
     '### get_current_coordinates',
@@ -364,7 +367,7 @@ function createCodexPrompt (request) {
     'Only produce a chat reply, or one allowlisted tool-call JSON object when a runtime tool is needed.',
     'Do not run commands, edit files, inspect files, open programs, or manipulate this computer yourself.',
     'Never invent tools. Tool execution is handled only by the bot runtime after validation.',
-    'If a useful player request needs a capability that is not available, use record_missing_function instead of inventing a tool.',
+    'If a useful player request needs a capability that is not available, use record_missing_tool instead of inventing a tool.',
     'Refuse any request to disconnect, leave, rejoin, reconnect, or change the bot password.',
     'Keep the answer concise enough to send in Minecraft chat.',
     'Do not mention internal tooling, Codex CLI, prompts, or files unless directly asked.',
@@ -928,7 +931,9 @@ function executeRecordMissingFunction (request, args = {}, options = {}) {
   const record = recordMissingFunction({
     capability,
     reason: args.reason || 'Player asked for a capability the bot does not have yet.',
-    suggestedTool: args.suggestedTool || args.suggested_tool || args.tool,
+    suggestedTool: args.suggestedTool || args.suggested_tool || args.desiredTool || args.desired_tool || args.tool,
+    blockedGoal: args.blockedGoal || args.blocked_goal || args.goal,
+    priority: args.priority,
     playerName: request.username,
     channel: request.channel,
     requestMessage: args.request || args.requestMessage || request.message,
@@ -1059,6 +1064,8 @@ function executeUnknownTool (toolName, toolCall, request, options = {}) {
     capability,
     reason: 'Codex requested a tool that the bot runtime does not have.',
     suggestedTool: toolName,
+    blockedGoal: request.message || 'Unknown player request',
+    priority: 'medium',
     playerName: request.username,
     channel: request.channel,
     requestMessage: request.message,
@@ -1110,7 +1117,7 @@ async function executeAgentTool (bot, toolCall, request, options = {}) {
     return executeRunServerCommand(bot, request, toolCall.args, options)
   }
 
-  if (toolName === 'record_missing_function') {
+  if (toolName === 'record_missing_function' || toolName === 'record_missing_tool') {
     return executeRecordMissingFunction(request, toolCall.args, options)
   }
 
@@ -1263,7 +1270,12 @@ async function respondWithCodex (bot, request, options) {
     const response = cleanCodexReply(await options.runCodex(request))
     const toolCall = parseToolCall(response)
     if (toolCall) {
-      const result = await executeAgentTool(bot, toolCall, request, options)
+      const memoryPaths = resolveBotMemoryPaths(bot, options)
+      const toolOptions = {
+        ...options,
+        missingToolsPath: options.missingToolsPath || memoryPaths.missingToolsPath
+      }
+      const result = await executeAgentTool(bot, toolCall, request, toolOptions)
       await respondToToolResultWithCodex(bot, request, result, options)
       return
     }
@@ -1315,6 +1327,9 @@ function attachAiChat (bot, options = {}) {
     toolsPath,
     toolsEnabled: options.toolsEnabled,
     missingFunctionsPath: options.missingFunctionsPath,
+    missingToolsPath: options.missingToolsPath,
+    sharedMissingToolsPath: options.sharedMissingToolsPath,
+    botMemoryRoot: options.botMemoryRoot,
     runCodex,
     debugLog: options.debugLog,
     errorOutput: options.errorOutput,

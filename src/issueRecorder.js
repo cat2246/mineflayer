@@ -163,6 +163,35 @@ function recordMissingFunction (entry, options = {}) {
   const channel = compactText(entry.channel, 'unknown')
   const requestMessage = compactText(entry.requestMessage, '')
   const source = compactText(entry.source, 'unknown')
+  const missingToolEntry = {
+    capability,
+    desiredTool: suggestedTool,
+    blockedGoal: entry.blockedGoal || 'Unspecified goal',
+    reason,
+    context: {
+      playerName,
+      channel,
+      requestMessage,
+      source,
+      rawTool: entry.rawTool || null
+    },
+    priority: entry.priority
+  }
+  let missingTool = null
+  let sharedMissingTool = null
+
+  try {
+    const { recordMissingTool, recordSharedMissingTool } = require('./missingTools')
+    if (options.missingToolsPath) {
+      missingTool = recordMissingTool(missingToolEntry, options)
+    }
+    if (options.sharedMissingToolsPath) {
+      sharedMissingTool = recordSharedMissingTool(missingToolEntry, options)
+    }
+  } catch (err) {
+    missingTool = { error: err.message }
+  }
+
   const lines = [
     `## ${timestamp} - ${capability}`,
     '',
@@ -181,6 +210,8 @@ function recordMissingFunction (entry, options = {}) {
     capability,
     key,
     path: missingFunctionsPath,
+    missingTool,
+    sharedMissingTool,
     recorded: appendUniqueMarkdownEntry({
       fs: options.fs,
       filePath: missingFunctionsPath,
