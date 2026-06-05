@@ -3593,6 +3593,61 @@ describe('holocraft bot config', function () {
     assert.match(fs.readFileSync(missingFunctionsPath, 'utf8'), /mine ore safely/)
   })
 
+  it('records shared missing tools by default when structured per-bot recording is enabled', () => {
+    const { recordMissingFunction } = require('../bot')
+    const missingTools = require('../src/missingTools')
+    const missingFunctionsPath = tempMissingFunctionsPath()
+    const missingToolsPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'missing-tools-')), 'missing-tools.json')
+    const originalRecordMissingTool = missingTools.recordMissingTool
+    const originalRecordSharedMissingTool = missingTools.recordSharedMissingTool
+    const perBotCalls = []
+    const sharedCalls = []
+
+    missingTools.recordMissingTool = (entry, options) => {
+      perBotCalls.push({ entry, options })
+      return {
+        id: 'per-bot',
+        capability: entry.capability,
+        path: options.missingToolsPath,
+        recorded: true
+      }
+    }
+    missingTools.recordSharedMissingTool = (entry, options) => {
+      sharedCalls.push({ entry, options })
+      return {
+        id: 'shared',
+        capability: entry.capability,
+        path: 'default-shared-missing-tools.json',
+        recorded: true
+      }
+    }
+
+    try {
+      const result = recordMissingFunction({
+        capability: 'mine ore safely',
+        reason: 'Need iron.',
+        suggestedTool: 'mine_block_or_vein',
+        playerName: 'idle-planner',
+        channel: 'npc',
+        requestMessage: 'Upgrade gear',
+        source: 'ai-npc'
+      }, {
+        missingFunctionsPath,
+        missingToolsPath,
+        now: () => new Date('2026-06-02T12:00:00.000Z')
+      })
+
+      assert.strictEqual(perBotCalls.length, 1)
+      assert.strictEqual(sharedCalls.length, 1)
+      assert.strictEqual(sharedCalls[0].options.sharedMissingToolsPath, undefined)
+      assert.strictEqual(sharedCalls[0].entry.capability, 'mine ore safely')
+      assert.strictEqual(result.sharedMissingTool.path, 'default-shared-missing-tools.json')
+    } finally {
+      missingTools.recordMissingTool = originalRecordMissingTool
+      missingTools.recordSharedMissingTool = originalRecordSharedMissingTool
+    }
+  })
+
   it('records structured missing tools with stable dedupe', () => {
     const { recordMissingTool, readMissingTools } = require('../bot')
     const missingToolsPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'missing-tools-')), 'missing-tools.json')

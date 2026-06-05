@@ -5,7 +5,8 @@ const {
   DEBUG_LOG_PATH,
   ERROR_LOG_MONITOR_INTERVAL_MS,
   ERROR_REVIEW_PATH,
-  MISSING_FUNCTIONS_PATH
+  MISSING_FUNCTIONS_PATH,
+  SHARED_MISSING_TOOLS_PATH
 } = require('./config')
 
 function compactText (value, fallback = '') {
@@ -151,6 +152,11 @@ function missingFunctionKey (entry) {
   ].join('|'))
 }
 
+function sameResolvedPath (firstPath, secondPath) {
+  if (!firstPath || !secondPath) return false
+  return path.resolve(firstPath) === path.resolve(secondPath)
+}
+
 function recordMissingFunction (entry, options = {}) {
   const missingFunctionsPath = options.missingFunctionsPath || MISSING_FUNCTIONS_PATH
   const capability = compactText(entry.capability, 'Unknown missing function')
@@ -185,7 +191,10 @@ function recordMissingFunction (entry, options = {}) {
     if (options.missingToolsPath) {
       missingTool = recordMissingTool(missingToolEntry, options)
     }
-    if (options.sharedMissingToolsPath) {
+    const sharedMissingToolsPath = options.sharedMissingToolsPath || SHARED_MISSING_TOOLS_PATH
+    const shouldRecordSharedMissingTool = (options.missingToolsPath || options.sharedMissingToolsPath) &&
+      !sameResolvedPath(options.missingToolsPath, sharedMissingToolsPath)
+    if (shouldRecordSharedMissingTool) {
       sharedMissingTool = recordSharedMissingTool(missingToolEntry, options)
     }
   } catch (err) {
