@@ -8170,6 +8170,82 @@ describe('holocraft bot config', function () {
     assert(life.recentEvents.some(event => event.type === 'automation_started' && event.automation === 'Farming'))
   })
 
+  it('refreshes the NPC life goal after planner outcomes change lifestyle', async () => {
+    const { createNpcLifeController, emptyNpcLife, runAiNpcCycle, writeNpcLife, readNpcLife } = require('../bot')
+    const npcLifePath = tempNpcLifePath()
+    const bot = new EventEmitter()
+    bot.username = 'TestBot123'
+    bot.health = 20
+    bot.food = 20
+    bot.time = { isDay: true, timeOfDay: 1000 }
+    bot.entity = { position: combatPosition(0, 64, 0) }
+    bot.inventory = { items: () => [] }
+    bot.players = {}
+    writeNpcLife({
+      ...emptyNpcLife({ now: () => 1000 }),
+      lifestyles: {
+        survivalist: 40,
+        homesteader: 65,
+        explorer: 20,
+        miner: 15,
+        trader: 10,
+        protector: 10
+      }
+    }, { npcLifePath, now: () => 1000 })
+
+    await runAiNpcCycle(bot, {
+      npcLife: createNpcLifeController({ npcLifePath, now: () => 2000 }),
+      automationManager: {
+        getStatus: () => ({ active: null }),
+        isIdle: () => true,
+        list: () => [{ name: 'Farming' }],
+        startByIndex: async () => true
+      },
+      followController: {
+        getStatus: () => ({ followedPlayerName: null }),
+        isIdle: () => true
+      },
+      runPlanner: async () => ({ action: 'start_automation', automation: 'Farming', reason: 'farm life' }),
+      now: () => 2000
+    })
+
+    const life = readNpcLife({ npcLifePath })
+    assert.strictEqual(life.currentLifestyle, 'homesteader')
+    assert.strictEqual(life.currentGoal.id, 'improve-home-routine')
+  })
+
+  it('records unsafe NPC life events while skipping busy AI NPC cycles', async () => {
+    const { createNpcLifeController, runAiNpcCycle, readNpcLife } = require('../bot')
+    const npcLifePath = tempNpcLifePath()
+    const bot = new EventEmitter()
+    bot.username = 'TestBot123'
+    bot.currentWindow = { title: 'Chest' }
+    bot.entity = { position: combatPosition(0, 64, 0) }
+    bot.inventory = { items: () => [] }
+    bot.players = {}
+
+    const result = await runAiNpcCycle(bot, {
+      npcLife: createNpcLifeController({ npcLifePath, now: () => 1000 }),
+      automationManager: {
+        getStatus: () => ({ active: null }),
+        isIdle: () => true,
+        list: () => []
+      },
+      followController: {
+        getStatus: () => ({ followedPlayerName: null }),
+        isIdle: () => true
+      },
+      runPlanner: async () => {
+        throw new Error('planner should not run')
+      },
+      now: () => 1000
+    })
+
+    const life = readNpcLife({ npcLifePath })
+    assert.strictEqual(result.skipped, true)
+    assert(life.recentEvents.some(event => event.type === 'unsafe'))
+  })
+
   it('asks Codex for an idle NPC plan and starts the selected automation', async () => {
     const { runAiNpcCycle } = require('../bot')
     const bot = new EventEmitter()

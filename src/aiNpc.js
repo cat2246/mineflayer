@@ -421,7 +421,10 @@ async function executeAiNpcInstruction (bot, instruction, options = {}) {
 
 async function runAiNpcCycle (bot, options = {}) {
   const debugLog = options.debugLog || (() => {})
-  if (!isAiNpcIdle(bot, options)) {
+  const lifeContext = aiNpcLifeContext(bot, options)
+  if (lifeContext.unsafe) {
+    if (typeof options.npcLife?.record === 'function') options.npcLife.record({ type: 'unsafe', at: lifeContext.now })
+    if (typeof options.npcLife?.updateGoal === 'function') options.npcLife.updateGoal(lifeContext)
     debugLog('aiNpc.skipped', { reason: 'busy' })
     return {
       ok: true,
@@ -430,7 +433,6 @@ async function runAiNpcCycle (bot, options = {}) {
     }
   }
 
-  const lifeContext = aiNpcLifeContext(bot, options)
   recordAiNpcLifeCycle(options.npcLife, lifeContext)
   if (typeof options.npcLife?.updateGoal === 'function') options.npcLife.updateGoal(lifeContext)
 
@@ -447,7 +449,10 @@ async function runAiNpcCycle (bot, options = {}) {
   const instruction = parseAiNpcInstruction(response)
   const execution = await executeAiNpcInstruction(bot, instruction, options)
   const lifeEvent = executionLifeEvent(instruction, execution, lifeContext.now)
-  if (lifeEvent && typeof options.npcLife?.record === 'function') options.npcLife.record(lifeEvent)
+  if (lifeEvent && typeof options.npcLife?.record === 'function') {
+    options.npcLife.record(lifeEvent)
+    if (typeof options.npcLife?.updateGoal === 'function') options.npcLife.updateGoal(lifeContext)
+  }
   debugLog('aiNpc.response', {
     action: instruction.action,
     ok: execution.ok !== false,
