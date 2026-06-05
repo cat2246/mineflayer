@@ -8124,6 +8124,20 @@ describe('holocraft bot config', function () {
     assert(prompt.includes('improve-home-routine'))
   })
 
+  it('does not reference NPC life goals without NPC life', () => {
+    const { createAiNpcPrompt } = require('../bot')
+    const state = {
+      bot: { username: 'TestBot123' },
+      automations: [{ name: 'Farming' }],
+      players: [],
+      life: null
+    }
+
+    const prompt = createAiNpcPrompt(state)
+
+    assert(!prompt.includes('state.life.currentGoal'))
+  })
+
   it('asks Codex for an idle NPC plan and starts the selected automation', async () => {
     const { runAiNpcCycle } = require('../bot')
     const bot = new EventEmitter()
