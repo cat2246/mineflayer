@@ -79,7 +79,7 @@ function emptyNpcLife (options = {}) {
   }
 }
 
-function normalizeGoal (goal, fallback = defaultGoal()) {
+function normalizeGoal (goal, fallback = defaultGoal(0)) {
   if (!goal || typeof goal !== 'object' || !cleanOptionalString(goal.id, 80)) return fallback
 
   return {
@@ -147,6 +147,9 @@ function normalizeNpcLife (life, options = {}) {
   const currentLifestyle = Object.prototype.hasOwnProperty.call(lifestyles, life.currentLifestyle)
     ? life.currentLifestyle
     : base.currentLifestyle
+  const updatedAt = typeof life.updatedAt === 'number' && Number.isFinite(life.updatedAt)
+    ? life.updatedAt
+    : base.updatedAt
 
   return {
     version: NPC_LIFE_VERSION,
@@ -166,7 +169,7 @@ function normalizeNpcLife (life, options = {}) {
       ? life.recentEvents
         .filter(event => event && typeof event === 'object' && !Array.isArray(event))
         .slice(-MAX_RECENT_EVENTS)
-        .map(event => normalizeRecentEvent(event, base.updatedAt))
+        .map(event => normalizeRecentEvent(event, updatedAt))
       : [],
     lifeStory: Array.isArray(life.lifeStory)
       ? life.lifeStory
@@ -174,9 +177,7 @@ function normalizeNpcLife (life, options = {}) {
         .map(entry => entry.trim().slice(0, 180))
         .slice(-MAX_LIFE_STORY)
       : base.lifeStory,
-    updatedAt: typeof life.updatedAt === 'number' && Number.isFinite(life.updatedAt)
-      ? life.updatedAt
-      : base.updatedAt
+    updatedAt
   }
 }
 

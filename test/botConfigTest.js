@@ -71,6 +71,24 @@ describe('holocraft bot config', function () {
     const { normalizeGoal } = require('../bot')
 
     assert.strictEqual(normalizeGoal({ id: '' }).id, 'survive-and-settle')
+    assert.strictEqual(normalizeGoal({ id: 'custom' }).selectedAt, 0)
+  })
+
+  it('normalizes recent event timestamps from persisted updatedAt', () => {
+    const { normalizeNpcLife } = require('../bot')
+    const rawLife = {
+      updatedAt: 7777,
+      recentEvents: [{
+        type: 'automation_started',
+        automation: 'Farming'
+      }]
+    }
+
+    const first = normalizeNpcLife(rawLife, { now: () => 8888 })
+    const second = normalizeNpcLife(rawLife, { now: () => 9999 })
+
+    assert.strictEqual(first.recentEvents[0].at, 7777)
+    assert.strictEqual(second.recentEvents[0].at, 7777)
   })
 
   it('evolves toward homesteader after repeated homesteader events', () => {
