@@ -43,7 +43,15 @@ describe('holocraft bot config', function () {
       lifestyles: { homesteader: 120, explorer: -5 },
       currentLifestyle: 'unknown',
       currentGoal: { id: '' },
-      recentEvents: 'bad',
+      recentEvents: [
+        {
+          type: 'player_nearby',
+          player: ' Steve ',
+          reason: 'hello'.repeat(80),
+          ignored: 'drop me',
+          at: 1500
+        }
+      ],
       lifeStory: [123, 'I built a fence.']
     }, { now: () => 2000 })
 
@@ -53,6 +61,9 @@ describe('holocraft bot config', function () {
     assert.strictEqual(life.lifestyles.explorer, 0)
     assert.strictEqual(life.currentLifestyle, 'survivalist')
     assert.strictEqual(life.currentGoal.id, 'survive-and-settle')
+    assert.strictEqual(life.recentEvents[0].player, 'Steve')
+    assert.strictEqual(life.recentEvents[0].reason.length, 180)
+    assert.strictEqual(life.recentEvents[0].ignored, undefined)
     assert.deepStrictEqual(life.lifeStory, ['I built a fence.'])
   })
 
@@ -79,6 +90,26 @@ describe('holocraft bot config', function () {
     assert(life.lifeStory.some(entry => entry.includes('homesteader')))
   })
 
+  it('preserves bounded recent event payload fields', () => {
+    const { applyNpcLifeEvent, emptyNpcLife, eventDeltas } = require('../bot')
+
+    const life = applyNpcLifeEvent(emptyNpcLife({ now: () => 1000 }), {
+      type: 'automation_started',
+      automation: 'Farming',
+      reason: 'farm life',
+      extra: 'drop me',
+      at: 1234
+    }, { now: () => 2000 })
+
+    assert.deepStrictEqual(life.recentEvents[0], {
+      type: 'automation_started',
+      at: 1234,
+      automation: 'Farming',
+      reason: 'farm life'
+    })
+    assert.deepStrictEqual(eventDeltas(null), {})
+  })
+
   it('selects food and night safety goals from current needs', () => {
     const { chooseNpcGoal, emptyNpcLife } = require('../bot')
     const life = emptyNpcLife({ now: () => 1000 })
@@ -95,6 +126,17 @@ describe('holocraft bot config', function () {
 
     assert.strictEqual(updated.currentGoal.id, 'secure-food')
     assert.strictEqual(updated.updatedAt, 2000)
+  })
+
+  it('uses one timestamp when updating the selected goal', () => {
+    const { emptyNpcLife, updateNpcGoal } = require('../bot')
+    let now = 2000
+    const clock = () => now++
+    const life = emptyNpcLife({ now: () => 1000 })
+
+    const updated = updateNpcGoal(life, { food: 8 }, { now: clock })
+
+    assert.strictEqual(updated.updatedAt, updated.currentGoal.selectedAt)
   })
 
   it('profile store creates offline and online bot profiles locally', () => {

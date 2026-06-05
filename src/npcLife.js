@@ -107,6 +107,8 @@ function applyScoreDelta (scores, deltas) {
 }
 
 function eventDeltas (event) {
+  if (!event || typeof event !== 'object' || Array.isArray(event)) return {}
+
   if (event.type === 'automation_started') {
     const automation = String(event.automation || '').toLowerCase()
     if (automation === 'farming' || automation === 'wood cutting') return { lifestyles: { homesteader: 5 }, traits: { ambitious: 1 } }
@@ -161,7 +163,10 @@ function normalizeNpcLife (life, options = {}) {
       : null,
     currentGoal: normalizeGoal(life.currentGoal, base.currentGoal),
     recentEvents: Array.isArray(life.recentEvents)
-      ? life.recentEvents.filter(event => event && typeof event === 'object' && !Array.isArray(event)).slice(-MAX_RECENT_EVENTS)
+      ? life.recentEvents
+        .filter(event => event && typeof event === 'object' && !Array.isArray(event))
+        .slice(-MAX_RECENT_EVENTS)
+        .map(event => normalizeRecentEvent(event, base.updatedAt))
       : [],
     lifeStory: Array.isArray(life.lifeStory)
       ? life.lifeStory
@@ -177,10 +182,17 @@ function normalizeNpcLife (life, options = {}) {
 
 function normalizeRecentEvent (event, now) {
   const input = event && typeof event === 'object' && !Array.isArray(event) ? event : {}
-  return {
+  const next = {
     type: cleanString(input.type, 'unknown', 80),
     at: typeof input.at === 'number' && Number.isFinite(input.at) ? input.at : now
   }
+
+  for (const key of ['automation', 'player', 'reason']) {
+    const value = cleanOptionalString(input[key], key === 'reason' ? 180 : 80)
+    if (value) next[key] = value
+  }
+
+  return next
 }
 
 function applyNpcLifeEvent (life, event, options = {}) {
@@ -297,11 +309,13 @@ function chooseNpcGoal (life, context = {}, options = {}) {
 
 function updateNpcGoal (life, context, options = {}) {
   const now = options.now ? options.now() : Date.now()
+  const fixedOptions = { ...options, now: () => now }
+  const current = normalizeNpcLife(life, fixedOptions)
   return normalizeNpcLife({
-    ...normalizeNpcLife(life, options),
-    currentGoal: chooseNpcGoal(life, context, options),
+    ...current,
+    currentGoal: chooseNpcGoal(current, context, fixedOptions),
     updatedAt: now
-  }, options)
+  }, fixedOptions)
 }
 
 function npcLifePath (options = {}) {
