@@ -23,6 +23,169 @@ describe('holocraft bot config', function () {
     })
   })
 
+  it('creates default NPC life state when no local file exists', () => {
+    const { readNpcLife, NPC_LIFE_VERSION } = require('../bot')
+    const lifePath = tempNpcLifePath()
+
+    const life = readNpcLife({ npcLifePath: lifePath, now: () => 1000 })
+
+    assert.strictEqual(life.version, NPC_LIFE_VERSION)
+    assert.strictEqual(life.currentLifestyle, 'survivalist')
+    assert.strictEqual(life.currentGoal.id, 'survive-and-settle')
+    assert.deepStrictEqual(life.recentEvents, [])
+  })
+
+  it('resolves sanitized per-bot memory paths from bot username', () => {
+    const { resolveBotMemoryPaths } = require('../bot')
+    const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'bot-memory-')), 'bots')
+
+    const paths = resolveBotMemoryPaths({
+      username: 'Pyro Farm/Bot'
+    }, { botMemoryRoot: root })
+
+    assert.strictEqual(paths.botId, 'pyro-farm-bot')
+    assert.strictEqual(paths.root, path.join(root, 'pyro-farm-bot'))
+    assert.strictEqual(paths.missingToolsPath, path.join(root, 'pyro-farm-bot', 'missing-tools.json'))
+    assert.strictEqual(paths.memorySummaryPath, path.join(root, 'pyro-farm-bot', 'memory-summary.json'))
+    assert.strictEqual(paths.eventLogPath, path.join(root, 'pyro-farm-bot', 'event-log.jsonl'))
+    assert.strictEqual(paths.debugLogPath, path.join(root, 'pyro-farm-bot', 'debug.log'))
+  })
+
+  it('uses configured profile id before username for per-bot memory', () => {
+    const { resolveBotMemoryPaths } = require('../bot')
+    const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'bot-memory-')), 'bots')
+
+    const paths = resolveBotMemoryPaths({
+      username: 'VisibleName',
+      profile: { id: '1234-ABCD main' }
+    }, { botMemoryRoot: root })
+
+    assert.strictEqual(paths.botId, '1234-abcd-main')
+    assert.strictEqual(paths.root, path.join(root, '1234-abcd-main'))
+  })
+
+  it('normalizes malformed NPC life state safely', () => {
+    const { normalizeNpcLife } = require('../bot')
+
+    const life = normalizeNpcLife({
+      traits: { curious: 500, cautious: -10 },
+      lifestyles: { homesteader: 120, explorer: -5 },
+      currentLifestyle: 'unknown',
+      currentGoal: { id: '' },
+      recentEvents: [
+        {
+          type: 'player_nearby',
+          player: ' Steve ',
+          reason: 'hello'.repeat(80),
+          ignored: 'drop me',
+          at: 1500
+        }
+      ],
+      lifeStory: [123, 'I built a fence.']
+    }, { now: () => 2000 })
+
+    assert.strictEqual(life.traits.curious, 100)
+    assert.strictEqual(life.traits.cautious, 0)
+    assert.strictEqual(life.lifestyles.homesteader, 100)
+    assert.strictEqual(life.lifestyles.explorer, 0)
+    assert.strictEqual(life.currentLifestyle, 'survivalist')
+    assert.strictEqual(life.currentGoal.id, 'survive-and-settle')
+    assert.strictEqual(life.recentEvents[0].player, 'Steve')
+    assert.strictEqual(life.recentEvents[0].reason.length, 180)
+    assert.strictEqual(life.recentEvents[0].ignored, undefined)
+    assert.deepStrictEqual(life.lifeStory, ['I built a fence.'])
+  })
+
+  it('normalizes goals safely without an explicit fallback', () => {
+    const { normalizeGoal } = require('../bot')
+
+    assert.strictEqual(normalizeGoal({ id: '' }).id, 'survive-and-settle')
+    assert.strictEqual(normalizeGoal({ id: 'custom' }).selectedAt, 0)
+  })
+
+  it('normalizes recent event timestamps from persisted updatedAt', () => {
+    const { normalizeNpcLife } = require('../bot')
+    const rawLife = {
+      updatedAt: 7777,
+      recentEvents: [{
+        type: 'automation_started',
+        automation: 'Farming'
+      }]
+    }
+
+    const first = normalizeNpcLife(rawLife, { now: () => 8888 })
+    const second = normalizeNpcLife(rawLife, { now: () => 9999 })
+
+    assert.strictEqual(first.recentEvents[0].at, 7777)
+    assert.strictEqual(second.recentEvents[0].at, 7777)
+  })
+
+  it('evolves toward homesteader after repeated homesteader events', () => {
+    const { applyNpcLifeEvent, emptyNpcLife } = require('../bot')
+    let life = emptyNpcLife({ now: () => 1000 })
+
+    for (let i = 0; i < 6; i++) {
+      life = applyNpcLifeEvent(life, {
+        type: 'automation_started',
+        automation: 'Farming',
+        at: 1000 + i
+      }, { now: () => 1000 + i })
+    }
+
+    assert.strictEqual(life.currentLifestyle, 'homesteader')
+    assert.strictEqual(life.previousLifestyle, 'survivalist')
+    assert(life.lifeStory.some(entry => entry.includes('homesteader')))
+  })
+
+  it('preserves bounded recent event payload fields', () => {
+    const { applyNpcLifeEvent, emptyNpcLife, eventDeltas } = require('../bot')
+
+    const life = applyNpcLifeEvent(emptyNpcLife({ now: () => 1000 }), {
+      type: 'automation_started',
+      automation: 'Farming',
+      reason: 'farm life',
+      extra: 'drop me',
+      at: 1234
+    }, { now: () => 2000 })
+
+    assert.deepStrictEqual(life.recentEvents[0], {
+      type: 'automation_started',
+      at: 1234,
+      automation: 'Farming',
+      reason: 'farm life'
+    })
+    assert.deepStrictEqual(eventDeltas(null), {})
+  })
+
+  it('selects food and night safety goals from current needs', () => {
+    const { chooseNpcGoal, emptyNpcLife } = require('../bot')
+    const life = emptyNpcLife({ now: () => 1000 })
+
+    assert.strictEqual(chooseNpcGoal(life, { food: 8, isNight: false, unsafe: false }, { now: () => 2000 }).id, 'secure-food')
+    assert.strictEqual(chooseNpcGoal(life, { food: 20, isNight: true, unsafe: false }, { now: () => 3000 }).id, 'stay-safe-until-morning')
+  })
+
+  it('updates NPC life with a selected goal', () => {
+    const { emptyNpcLife, updateNpcGoal } = require('../bot')
+    const life = emptyNpcLife({ now: () => 1000 })
+
+    const updated = updateNpcGoal(life, { food: 8 }, { now: () => 2000 })
+
+    assert.strictEqual(updated.currentGoal.id, 'secure-food')
+    assert.strictEqual(updated.updatedAt, 2000)
+  })
+
+  it('uses one timestamp when updating the selected goal', () => {
+    const { emptyNpcLife, updateNpcGoal } = require('../bot')
+    let now = 2000
+    const clock = () => now++
+    const life = emptyNpcLife({ now: () => 1000 })
+
+    const updated = updateNpcGoal(life, { food: 8 }, { now: clock })
+
+    assert.strictEqual(updated.updatedAt, updated.currentGoal.selectedAt)
+  })
+
   it('profile store creates offline and online bot profiles locally', () => {
     const { createProfileStore } = require('../bot')
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-profiles-'))
@@ -3376,6 +3539,252 @@ describe('holocraft bot config', function () {
     assert(missing.includes('craft_item'))
   })
 
+  it('records structured missing tools from Codex tool calls', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const missingFunctionsPath = tempMissingFunctionsPath()
+    const botMemoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-memory-'))
+    const sharedMissingToolsPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'shared-missing-')), 'missing-tools.json')
+    const bot = new EventEmitter()
+    bot.username = 'LifeBot'
+    bot.chat = message => events.push(['chat', message])
+
+    attachAiChat(bot, {
+      memoryEnabled: false,
+      missingFunctionsPath,
+      botMemoryRoot,
+      sharedMissingToolsPath,
+      now: () => new Date('2026-06-02T12:00:00.000Z'),
+      runCodex: async request => {
+        if (request.toolResult) {
+          assert.strictEqual(request.toolResult.tool, 'record_missing_function')
+          return 'I wrote that down for future upgrades.'
+        }
+        return JSON.stringify({
+          tool: 'record_missing_tool',
+          args: {
+            capability: 'mine ore safely',
+            desiredTool: 'mine_block_or_vein',
+            blockedGoal: 'Upgrade gear',
+            reason: 'The bot needs iron but has no mining tool.',
+            priority: 'high'
+          }
+        })
+      }
+    })
+
+    bot.emit('chat', 'Steve', 'LifeBot upgrade your gear')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    const perBotPath = path.join(botMemoryRoot, 'lifebot', 'missing-tools.json')
+    const perBot = JSON.parse(fs.readFileSync(perBotPath, 'utf8'))
+    const shared = JSON.parse(fs.readFileSync(sharedMissingToolsPath, 'utf8'))
+
+    assert.deepStrictEqual(events, [
+      ['chat', '@Steve I wrote that down for future upgrades.']
+    ])
+    assert.strictEqual(perBot.length, 1)
+    assert.strictEqual(shared.length, 1)
+    assert.strictEqual(perBot[0].capability, 'mine ore safely')
+    assert.strictEqual(perBot[0].desiredTool, 'mine_block_or_vein')
+    assert.strictEqual(perBot[0].blockedGoal, 'Upgrade gear')
+    assert.strictEqual(perBot[0].priority, 'high')
+    assert.match(fs.readFileSync(missingFunctionsPath, 'utf8'), /mine ore safely/)
+  })
+
+  it('records shared missing tools by default when structured per-bot recording is enabled', () => {
+    const { recordMissingFunction } = require('../bot')
+    const missingTools = require('../src/missingTools')
+    const missingFunctionsPath = tempMissingFunctionsPath()
+    const missingToolsPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'missing-tools-')), 'missing-tools.json')
+    const originalRecordMissingTool = missingTools.recordMissingTool
+    const originalRecordSharedMissingTool = missingTools.recordSharedMissingTool
+    const perBotCalls = []
+    const sharedCalls = []
+
+    missingTools.recordMissingTool = (entry, options) => {
+      perBotCalls.push({ entry, options })
+      return {
+        id: 'per-bot',
+        capability: entry.capability,
+        path: options.missingToolsPath,
+        recorded: true
+      }
+    }
+    missingTools.recordSharedMissingTool = (entry, options) => {
+      sharedCalls.push({ entry, options })
+      return {
+        id: 'shared',
+        capability: entry.capability,
+        path: 'default-shared-missing-tools.json',
+        recorded: true
+      }
+    }
+
+    try {
+      const result = recordMissingFunction({
+        capability: 'mine ore safely',
+        reason: 'Need iron.',
+        suggestedTool: 'mine_block_or_vein',
+        playerName: 'idle-planner',
+        channel: 'npc',
+        requestMessage: 'Upgrade gear',
+        source: 'ai-npc'
+      }, {
+        missingFunctionsPath,
+        missingToolsPath,
+        now: () => new Date('2026-06-02T12:00:00.000Z')
+      })
+
+      assert.strictEqual(perBotCalls.length, 1)
+      assert.strictEqual(sharedCalls.length, 1)
+      assert.strictEqual(sharedCalls[0].options.sharedMissingToolsPath, undefined)
+      assert.strictEqual(sharedCalls[0].entry.capability, 'mine ore safely')
+      assert.strictEqual(result.sharedMissingTool.path, 'default-shared-missing-tools.json')
+    } finally {
+      missingTools.recordMissingTool = originalRecordMissingTool
+      missingTools.recordSharedMissingTool = originalRecordSharedMissingTool
+    }
+  })
+
+  it('records structured missing tools with stable dedupe', () => {
+    const { recordMissingTool, readMissingTools } = require('../bot')
+    const missingToolsPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'missing-tools-')), 'missing-tools.json')
+    let now = 1000
+
+    const first = recordMissingTool({
+      capability: 'Mine ore safely',
+      desiredTool: 'mine_block_or_vein',
+      blockedGoal: 'Upgrade gear',
+      reason: 'Need iron for better gear.',
+      context: { inventory: ['stone_pickaxe'] },
+      priority: 'high'
+    }, { missingToolsPath, now: () => now })
+
+    now = 2000
+    const second = recordMissingTool({
+      capability: 'mine ore safely',
+      desiredTool: 'mine_block_or_vein',
+      blockedGoal: 'Upgrade gear',
+      reason: 'Need iron again.',
+      context: { inventory: ['stone_pickaxe', 'torch'] },
+      priority: 'medium'
+    }, { missingToolsPath, now: () => now })
+
+    const records = readMissingTools({ missingToolsPath })
+
+    assert.strictEqual(first.recorded, true)
+    assert.strictEqual(second.recorded, false)
+    assert.strictEqual(records.length, 1)
+    assert.strictEqual(records[0].id, 'mine-ore-safely-mine-block-or-vein-upgrade-gear')
+    assert.strictEqual(records[0].capability, 'Mine ore safely')
+    assert.strictEqual(records[0].desiredTool, 'mine_block_or_vein')
+    assert.strictEqual(records[0].blockedGoal, 'Upgrade gear')
+    assert.strictEqual(records[0].priority, 'high')
+    assert.strictEqual(records[0].count, 2)
+    assert.strictEqual(records[0].firstSeenAt, 1000)
+    assert.strictEqual(records[0].lastSeenAt, 2000)
+    assert.strictEqual(records[0].examples.length, 2)
+  })
+
+  it('limits relevant missing tool summaries for prompts', () => {
+    const { recordMissingTool, summarizeMissingTools } = require('../bot')
+    const missingToolsPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'missing-tools-')), 'missing-tools.json')
+
+    recordMissingTool({
+      capability: 'Mine ore safely',
+      desiredTool: 'mine_block_or_vein',
+      blockedGoal: 'Upgrade gear',
+      reason: 'Need iron.',
+      priority: 'high'
+    }, { missingToolsPath, now: () => 1000 })
+
+    recordMissingTool({
+      capability: 'Cook food',
+      desiredTool: 'cook_item',
+      blockedGoal: 'Build food supply',
+      reason: 'Need cooked food.',
+      priority: 'medium'
+    }, { missingToolsPath, now: () => 2000 })
+
+    const summary = summarizeMissingTools({
+      missingToolsPath,
+      currentGoal: 'Upgrade gear',
+      limit: 1
+    })
+
+    assert.deepStrictEqual(summary, [
+      'Mine ore safely blocked "Upgrade gear"; desired tool `mine_block_or_vein`; seen 1 time.'
+    ])
+  })
+
+  it('summarizes only the highest priority missing tools for prompt use', () => {
+    const { recordMissingTool, summarizeMissingTools } = require('../bot')
+    const missingToolsPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'missing-tools-')), 'missing-tools.json')
+
+    for (let i = 0; i < 6; i++) {
+      recordMissingTool({
+        capability: `Capability ${i}`,
+        desiredTool: `tool_${i}`,
+        blockedGoal: 'Upgrade gear',
+        reason: `Reason ${i}`,
+        priority: i === 5 ? 'high' : 'medium'
+      }, { missingToolsPath, now: () => 1000 + i })
+    }
+
+    for (let i = 0; i < 4; i++) {
+      recordMissingTool({
+        capability: 'Repeated medium capability',
+        desiredTool: 'repeated_medium_tool',
+        blockedGoal: 'Upgrade gear',
+        reason: `Repeated reason ${i}`,
+        priority: 'medium'
+      }, { missingToolsPath, now: () => 2000 + i })
+    }
+
+    const summary = summarizeMissingTools({
+      missingToolsPath,
+      currentGoal: 'Upgrade gear',
+      limit: 3
+    })
+
+    assert.strictEqual(summary.length, 3)
+    assert.match(summary[0], /Capability 5/)
+    assert(summary.every(line => line.includes('Upgrade gear')))
+  })
+
+  it('normalizes malformed missing tool records safely', () => {
+    const { readMissingTools } = require('../bot')
+    const missingToolsPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'missing-tools-')), 'missing-tools.json')
+
+    fs.writeFileSync(missingToolsPath, JSON.stringify([
+      null,
+      'not-an-object',
+      {
+        capability: 'Mine ore safely',
+        desiredTool: 'mine_block_or_vein',
+        blockedGoal: 'Upgrade gear',
+        reason: 'Need iron.',
+        priority: 'high',
+        count: 'bad',
+        firstSeenAt: 0,
+        lastSeenAt: 0,
+        examples: [{ at: 0, reason: 'Need iron.', context: {} }]
+      }
+    ]))
+
+    const records = readMissingTools({ missingToolsPath, now: () => 5000 })
+
+    assert.strictEqual(records.length, 3)
+    assert.strictEqual(records[0].capability, 'Mine ore safely')
+    assert.strictEqual(records[0].count, 1)
+    assert.strictEqual(records[0].firstSeenAt, 0)
+    assert.strictEqual(records[0].lastSeenAt, 0)
+    assert.strictEqual(records[0].examples[0].at, 0)
+    assert(records.some(record => record.capability === 'Unknown missing capability'))
+  })
+
   it('records unknown Codex tools as missing bot functions', async () => {
     const { attachAiChat } = require('../bot')
     const events = []
@@ -3404,6 +3813,39 @@ describe('holocraft bot config', function () {
     ])
     assert(missing.includes('Unknown tool: craft_item'))
     assert(missing.includes('oak_door'))
+  })
+
+  it('records unknown Codex tools into structured missing tool backlog', async () => {
+    const { attachAiChat } = require('../bot')
+    const missingFunctionsPath = tempMissingFunctionsPath()
+    const botMemoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-memory-'))
+    const sharedMissingToolsPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'shared-missing-')), 'missing-tools.json')
+    const bot = new EventEmitter()
+    bot.username = 'LifeBot'
+    bot.chat = () => {}
+
+    attachAiChat(bot, {
+      memoryEnabled: false,
+      missingFunctionsPath,
+      botMemoryRoot,
+      sharedMissingToolsPath,
+      runCodex: async request => {
+        if (request.toolResult) return 'I cannot do that yet.'
+        return JSON.stringify({
+          tool: 'mine_block_or_vein',
+          args: { blockType: 'iron_ore' }
+        })
+      }
+    })
+
+    bot.emit('chat', 'Steve', 'LifeBot mine iron')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    const records = JSON.parse(fs.readFileSync(path.join(botMemoryRoot, 'lifebot', 'missing-tools.json'), 'utf8'))
+    assert.strictEqual(records.length, 1)
+    assert.strictEqual(records[0].desiredTool, 'mine_block_or_vein')
+    assert.strictEqual(records[0].capability, 'Unknown tool: mine_block_or_vein')
   })
 
   it('reports current coordinates through a Codex tool call', async () => {
@@ -7909,8 +8351,8 @@ describe('holocraft bot config', function () {
     assert(entries.some(entry => entry.event === 'homes.detected'))
   })
 
-  it('schedules the idle NPC planner every five minutes', () => {
-    const { attachAiNpc, AI_NPC_IDLE_INTERVAL_MS } = require('../bot')
+  it('does not schedule the idle NPC planner automatically', () => {
+    const { attachAiNpc } = require('../bot')
     const bot = new EventEmitter()
     const timers = []
     const cleared = []
@@ -7934,13 +8376,182 @@ describe('holocraft bot config', function () {
       }
     })
 
-    assert.strictEqual(timers.length, 1)
-    assert.strictEqual(timers[0].delayMs, AI_NPC_IDLE_INTERVAL_MS)
-    assert.strictEqual(timers[0].unrefCalled, true)
+    assert.strictEqual(timers.length, 0)
     assert.strictEqual(typeof controller.runNow, 'function')
 
     controller.stop()
-    assert.deepStrictEqual(cleared, [timers[0]])
+    assert.deepStrictEqual(cleared, [])
+  })
+
+  it('includes NPC life state in AI NPC state snapshots', () => {
+    const { createAiNpcState, emptyNpcLife } = require('../bot')
+    const bot = new EventEmitter()
+    bot.username = 'TestBot123'
+    bot.entity = { position: combatPosition(0, 64, 0) }
+    bot.inventory = { items: () => [] }
+    bot.players = {}
+
+    const state = createAiNpcState(bot, {
+      npcLife: {
+        read: () => ({
+          ...emptyNpcLife({ now: () => 1000 }),
+          currentLifestyle: 'homesteader'
+        })
+      },
+      now: () => 1000
+    })
+
+    assert.strictEqual(state.life.currentLifestyle, 'homesteader')
+    assert.strictEqual(state.life.currentGoal.id, 'survive-and-settle')
+  })
+
+  it('guides the AI NPC prompt with lifestyle and current goal', () => {
+    const { createAiNpcPrompt, emptyNpcLife } = require('../bot')
+    const state = {
+      bot: { username: 'TestBot123' },
+      automations: [{ name: 'Farming' }],
+      players: [],
+      life: {
+        ...emptyNpcLife({ now: () => 1000 }),
+        currentLifestyle: 'homesteader',
+        currentGoal: {
+          id: 'improve-home-routine',
+          title: 'Improve the home routine',
+          reason: 'The NPC keeps returning to farming and storage.',
+          priority: 'progress',
+          selectedAt: 1000,
+          suggestedAutomations: ['Farming']
+        }
+      }
+    }
+
+    const prompt = createAiNpcPrompt(state)
+
+    assert(prompt.includes('own life'))
+    assert(prompt.includes('current lifestyle and goal'))
+    assert(prompt.includes('improve-home-routine'))
+  })
+
+  it('does not reference NPC life goals without NPC life', () => {
+    const { createAiNpcPrompt } = require('../bot')
+    const state = {
+      bot: { username: 'TestBot123' },
+      automations: [{ name: 'Farming' }],
+      players: [],
+      life: null
+    }
+
+    const prompt = createAiNpcPrompt(state)
+
+    assert(!prompt.includes('state.life.currentGoal'))
+  })
+
+  it('records AI NPC planner outcomes into NPC life state', async () => {
+    const { createNpcLifeController, runAiNpcCycle, readNpcLife } = require('../bot')
+    const npcLifePath = tempNpcLifePath()
+    const bot = new EventEmitter()
+    bot.username = 'TestBot123'
+    bot.health = 20
+    bot.food = 20
+    bot.time = { isDay: true, timeOfDay: 1000 }
+    bot.entity = { position: combatPosition(0, 64, 0) }
+    bot.inventory = { items: () => [] }
+    bot.players = {}
+
+    await runAiNpcCycle(bot, {
+      npcLife: createNpcLifeController({ npcLifePath, now: () => 1000 }),
+      automationManager: {
+        getStatus: () => ({ active: null }),
+        isIdle: () => true,
+        list: () => [{ name: 'Farming' }],
+        startByIndex: async () => true
+      },
+      followController: {
+        getStatus: () => ({ followedPlayerName: null }),
+        isIdle: () => true
+      },
+      runPlanner: async () => ({ action: 'start_automation', automation: 'Farming', reason: 'farm life' }),
+      now: () => 1000
+    })
+
+    const life = readNpcLife({ npcLifePath })
+    assert(life.recentEvents.some(event => event.type === 'automation_started' && event.automation === 'Farming'))
+  })
+
+  it('refreshes the NPC life goal after planner outcomes change lifestyle', async () => {
+    const { createNpcLifeController, emptyNpcLife, runAiNpcCycle, writeNpcLife, readNpcLife } = require('../bot')
+    const npcLifePath = tempNpcLifePath()
+    const bot = new EventEmitter()
+    bot.username = 'TestBot123'
+    bot.health = 20
+    bot.food = 20
+    bot.time = { isDay: true, timeOfDay: 1000 }
+    bot.entity = { position: combatPosition(0, 64, 0) }
+    bot.inventory = { items: () => [] }
+    bot.players = {}
+    writeNpcLife({
+      ...emptyNpcLife({ now: () => 1000 }),
+      lifestyles: {
+        survivalist: 40,
+        homesteader: 65,
+        explorer: 20,
+        miner: 15,
+        trader: 10,
+        protector: 10
+      }
+    }, { npcLifePath, now: () => 1000 })
+
+    await runAiNpcCycle(bot, {
+      npcLife: createNpcLifeController({ npcLifePath, now: () => 2000 }),
+      automationManager: {
+        getStatus: () => ({ active: null }),
+        isIdle: () => true,
+        list: () => [{ name: 'Farming' }],
+        startByIndex: async () => true
+      },
+      followController: {
+        getStatus: () => ({ followedPlayerName: null }),
+        isIdle: () => true
+      },
+      runPlanner: async () => ({ action: 'start_automation', automation: 'Farming', reason: 'farm life' }),
+      now: () => 2000
+    })
+
+    const life = readNpcLife({ npcLifePath })
+    assert.strictEqual(life.currentLifestyle, 'homesteader')
+    assert.strictEqual(life.currentGoal.id, 'improve-home-routine')
+  })
+
+  it('records unsafe NPC life events while skipping busy AI NPC cycles', async () => {
+    const { createNpcLifeController, runAiNpcCycle, readNpcLife } = require('../bot')
+    const npcLifePath = tempNpcLifePath()
+    const bot = new EventEmitter()
+    bot.username = 'TestBot123'
+    bot.currentWindow = { title: 'Chest' }
+    bot.entity = { position: combatPosition(0, 64, 0) }
+    bot.inventory = { items: () => [] }
+    bot.players = {}
+
+    const result = await runAiNpcCycle(bot, {
+      npcLife: createNpcLifeController({ npcLifePath, now: () => 1000 }),
+      automationManager: {
+        getStatus: () => ({ active: null }),
+        isIdle: () => true,
+        list: () => []
+      },
+      followController: {
+        getStatus: () => ({ followedPlayerName: null }),
+        isIdle: () => true
+      },
+      runPlanner: async () => {
+        throw new Error('planner should not run')
+      },
+      now: () => 1000
+    })
+
+    const life = readNpcLife({ npcLifePath })
+    assert.strictEqual(result.skipped, true)
+    assert(life.recentEvents.some(event => event.type === 'unsafe'))
   })
 
   it('asks Codex for an idle NPC plan and starts the selected automation', async () => {
@@ -7992,6 +8603,49 @@ describe('holocraft bot config', function () {
     assert.strictEqual(plannerState.inventory.items[0].name, 'oak_log')
     assert.strictEqual(result.instruction.action, 'start_automation')
     assert.strictEqual(result.execution.startedAutomation, 'Mining')
+  })
+
+  it('records AI NPC missing tools into per-bot memory', async () => {
+    const { runAiNpcCycle } = require('../bot')
+    const missingFunctionsPath = tempMissingFunctionsPath()
+    const botMemoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-memory-'))
+    const sharedMissingToolsPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'shared-missing-')), 'missing-tools.json')
+    const bot = new EventEmitter()
+    bot.username = 'LifeBot'
+    bot.food = 20
+    bot.health = 20
+    bot.time = { isDay: true, timeOfDay: 1000 }
+    bot.players = {}
+
+    const result = await runAiNpcCycle(bot, {
+      missingFunctionsPath,
+      botMemoryRoot,
+      sharedMissingToolsPath,
+      automationManager: {
+        isIdle: () => true,
+        list: () => [],
+        getStatus: () => ({ active: false })
+      },
+      followController: {
+        isIdle: () => true,
+        getStatus: () => ({ active: false })
+      },
+      runPlanner: async () => JSON.stringify({
+        action: 'record_missing_tool',
+        capability: 'mine ore safely',
+        desiredTool: 'mine_block_or_vein',
+        blockedGoal: 'Upgrade gear',
+        reason: 'I need iron gear but cannot mine ore yet.',
+        priority: 'high'
+      })
+    })
+
+    const records = JSON.parse(fs.readFileSync(path.join(botMemoryRoot, 'lifebot', 'missing-tools.json'), 'utf8'))
+
+    assert.strictEqual(result.execution.ok, true)
+    assert.strictEqual(records.length, 1)
+    assert.strictEqual(records[0].capability, 'mine ore safely')
+    assert.strictEqual(records[0].desiredTool, 'mine_block_or_vein')
   })
 
   it('does not run the idle NPC planner while the bot is busy', async () => {
@@ -8285,6 +8939,10 @@ function tempPyroFarmMemoryPath () {
 
 function tempPlacesPath () {
   return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'places-')), 'places.txt')
+}
+
+function tempNpcLifePath () {
+  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'npc-life-')), 'npc-life.json')
 }
 
 function tempMemoryPath () {

@@ -5,7 +5,8 @@ const {
   DEBUG_LOG_PATH,
   ERROR_LOG_MONITOR_INTERVAL_MS,
   ERROR_REVIEW_PATH,
-  MISSING_FUNCTIONS_PATH
+  MISSING_FUNCTIONS_PATH,
+  SHARED_MISSING_TOOLS_PATH
 } = require('./config')
 
 function compactText (value, fallback = '') {
@@ -151,6 +152,11 @@ function missingFunctionKey (entry) {
   ].join('|'))
 }
 
+function sameResolvedPath (firstPath, secondPath) {
+  if (!firstPath || !secondPath) return false
+  return path.resolve(firstPath) === path.resolve(secondPath)
+}
+
 function recordMissingFunction (entry, options = {}) {
   const missingFunctionsPath = options.missingFunctionsPath || MISSING_FUNCTIONS_PATH
   const capability = compactText(entry.capability, 'Unknown missing function')
@@ -163,6 +169,38 @@ function recordMissingFunction (entry, options = {}) {
   const channel = compactText(entry.channel, 'unknown')
   const requestMessage = compactText(entry.requestMessage, '')
   const source = compactText(entry.source, 'unknown')
+  const missingToolEntry = {
+    capability,
+    desiredTool: suggestedTool,
+    blockedGoal: entry.blockedGoal || 'Unspecified goal',
+    reason,
+    context: {
+      playerName,
+      channel,
+      requestMessage,
+      source,
+      rawTool: entry.rawTool || null
+    },
+    priority: entry.priority
+  }
+  let missingTool = null
+  let sharedMissingTool = null
+
+  try {
+    const { recordMissingTool, recordSharedMissingTool } = require('./missingTools')
+    if (options.missingToolsPath) {
+      missingTool = recordMissingTool(missingToolEntry, options)
+    }
+    const sharedMissingToolsPath = options.sharedMissingToolsPath || SHARED_MISSING_TOOLS_PATH
+    const shouldRecordSharedMissingTool = (options.missingToolsPath || options.sharedMissingToolsPath) &&
+      !sameResolvedPath(options.missingToolsPath, sharedMissingToolsPath)
+    if (shouldRecordSharedMissingTool) {
+      sharedMissingTool = recordSharedMissingTool(missingToolEntry, options)
+    }
+  } catch (err) {
+    missingTool = { error: err.message }
+  }
+
   const lines = [
     `## ${timestamp} - ${capability}`,
     '',
@@ -181,6 +219,8 @@ function recordMissingFunction (entry, options = {}) {
     capability,
     key,
     path: missingFunctionsPath,
+    missingTool,
+    sharedMissingTool,
     recorded: appendUniqueMarkdownEntry({
       fs: options.fs,
       filePath: missingFunctionsPath,

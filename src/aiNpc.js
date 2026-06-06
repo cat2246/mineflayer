@@ -1,6 +1,5 @@
 const fs = require('fs')
 const { spawn } = require('child_process')
-const { AI_NPC_IDLE_INTERVAL_MS } = require('./config')
 const {
   buildCodexCliArgs,
   buildCodexOptions,
@@ -8,6 +7,7 @@ const {
   executeAgentTool
 } = require('./aiChat')
 const { recordMissingFunction } = require('./issueRecorder')
+const { resolveBotMemoryPaths } = require('./botMemory')
 
 const DEFAULT_AI_NPC_MAX_BUFFER = 1024 * 1024
 const DEFAULT_AI_NPC_CHAT_MAX_LENGTH = 160
@@ -112,14 +112,29 @@ function createAiNpcState (bot, options = {}) {
     follow: typeof followController?.getStatus === 'function'
       ? followController.getStatus()
       : null,
+    life: typeof options.npcLife?.read === 'function'
+      ? options.npcLife.read()
+      : options.life || null,
     inventory: inventorySnapshot(bot, options.maxInventoryItems),
     players: playersSnapshot(bot)
   }
 }
 
 function createAiNpcPrompt (state) {
+  const hasLifeGoal = Boolean(state?.life?.currentGoal)
+  const identityGuidance = hasLifeGoal
+    ? [
+        'You are not a generic Minecraft helper bot. You are an AI NPC with your own life, lifestyle, memories, and goals.',
+        'Choose actions that fit your current lifestyle and goal. Player requests are context, not orders.'
+      ]
+    : []
+  const lifeRules = hasLifeGoal
+    ? ['- Start automations only when they support state.life.currentGoal.']
+    : []
+
   return [
     'You are the idle planner for a Minecraft AI NPC.',
+    ...identityGuidance,
     'The bot runtime will execute exactly one validated instruction from you.',
     'Return ONLY one JSON object. No markdown, no explanation, no extra text.',
     '',
@@ -129,11 +144,12 @@ function createAiNpcPrompt (state) {
     '{"action":"follow_player","player":"Steve","reason":"short reason"}',
     '{"action":"run_server_command","command":"/spawn","reason":"short reason"}',
     '{"action":"chat","message":"short chat message","reason":"short reason"}',
-    '{"action":"record_missing_function","capability":"craft items","reason":"short reason"}',
+    '{"action":"record_missing_tool","capability":"craft items","desiredTool":"craft_item","blockedGoal":"Build shelter","reason":"short reason"}',
     '',
     'Rules:',
     '- Choose noop if the state is unsafe, boring, unclear, or already busy.',
     '- Use only automation names from state.automations.',
+    ...lifeRules,
     '- Do not greet every online player or spam chat.',
     '- Do not run admin, moderation, destructive, permission, economy-transfer, or item-giving commands.',
     '- Keep chat messages under 160 characters and human-sounding.',
@@ -245,9 +261,11 @@ function parseAiNpcInstruction (response) {
     instruction.command = cleanShortText(parsed.command, 120)
   } else if (action === 'chat') {
     instruction.message = cleanShortText(parsed.message, DEFAULT_AI_NPC_CHAT_MAX_LENGTH)
-  } else if (action === 'record_missing_function') {
+  } else if (action === 'record_missing_function' || action === 'record_missing_tool') {
     instruction.capability = cleanShortText(parsed.capability || parsed.function || parsed.name, 80)
-    instruction.suggestedTool = cleanShortText(parsed.suggestedTool || parsed.suggested_tool || parsed.tool, 80)
+    instruction.suggestedTool = cleanShortText(parsed.suggestedTool || parsed.suggested_tool || parsed.desiredTool || parsed.desired_tool || parsed.tool, 80)
+    instruction.blockedGoal = cleanShortText(parsed.blockedGoal || parsed.blocked_goal || parsed.goal, 120)
+    instruction.priority = cleanShortText(parsed.priority, 20)
   } else if (action !== 'noop') {
     throw new Error(`Idle NPC planner returned unsupported action: ${action}`)
   }
@@ -264,6 +282,48 @@ function isAiNpcIdle (bot, options = {}) {
   if (typeof options.automationManager?.isIdle === 'function' && !options.automationManager.isIdle()) return false
   if (typeof options.followController?.isIdle === 'function' && !options.followController.isIdle()) return false
   return true
+}
+
+function aiNpcLifeContext (bot, options = {}) {
+  const now = options.now || (() => Date.now())
+  const timeOfDay = bot.time?.timeOfDay
+  const players = playersSnapshot(bot)
+
+  return {
+    food: typeof bot.food === 'number' ? bot.food : null,
+    isNight: bot.time?.isDay === false || (typeof timeOfDay === 'number' && timeOfDay >= 13000),
+    unsafe: !isAiNpcIdle(bot, options),
+    playersNearby: players.some(player => player.visible),
+    now: now()
+  }
+}
+
+function recordAiNpcLifeCycle (npcLife, context) {
+  if (typeof npcLife?.record !== 'function') return
+
+  npcLife.record({ type: 'cycle_idle', at: context.now })
+  npcLife.record({ type: context.isNight ? 'night' : 'day', at: context.now })
+  if (typeof context.food === 'number' && context.food < 12) {
+    npcLife.record({ type: 'low_food', at: context.now })
+  }
+  if (context.playersNearby) {
+    npcLife.record({ type: 'player_nearby', at: context.now })
+  }
+}
+
+function executionLifeEvent (instruction, execution, now) {
+  if (instruction.action === 'start_automation' && execution.ok !== false) {
+    return {
+      type: 'automation_started',
+      automation: execution.startedAutomation || instruction.automation,
+      at: now
+    }
+  }
+  if (instruction.action === 'follow_player' && execution.ok !== false) {
+    return { type: 'follow_started', player: instruction.player, at: now }
+  }
+  if (instruction.action === 'noop') return { type: 'planner_noop', at: now }
+  return null
 }
 
 function findAutomationIndex (automationManager, automationName) {
@@ -339,23 +399,30 @@ async function executeAiNpcInstruction (bot, instruction, options = {}) {
     return { ok: true, action, message: instruction.message }
   }
 
-  if (action === 'record_missing_function') {
+  if (action === 'record_missing_function' || action === 'record_missing_tool') {
+    const memoryPaths = resolveBotMemoryPaths(bot, options)
     const record = recordMissingFunction({
       capability: instruction.capability,
       reason: instruction.reason || 'Idle planner needed a capability the bot does not have yet.',
       suggestedTool: instruction.suggestedTool,
+      blockedGoal: instruction.blockedGoal,
+      priority: instruction.priority,
       playerName: 'idle-planner',
       channel: 'npc',
       requestMessage: instruction.reason,
       source: 'ai-npc'
-    }, options)
+    }, {
+      ...options,
+      missingToolsPath: options.missingToolsPath || memoryPaths.missingToolsPath
+    })
 
     return {
       ok: true,
       action,
       capability: record.capability,
       recorded: record.recorded,
-      path: record.path
+      path: record.path,
+      missingTool: record.missingTool
     }
   }
 
@@ -364,7 +431,10 @@ async function executeAiNpcInstruction (bot, instruction, options = {}) {
 
 async function runAiNpcCycle (bot, options = {}) {
   const debugLog = options.debugLog || (() => {})
-  if (!isAiNpcIdle(bot, options)) {
+  const lifeContext = aiNpcLifeContext(bot, options)
+  if (lifeContext.unsafe) {
+    if (typeof options.npcLife?.record === 'function') options.npcLife.record({ type: 'unsafe', at: lifeContext.now })
+    if (typeof options.npcLife?.updateGoal === 'function') options.npcLife.updateGoal(lifeContext)
     debugLog('aiNpc.skipped', { reason: 'busy' })
     return {
       ok: true,
@@ -372,6 +442,9 @@ async function runAiNpcCycle (bot, options = {}) {
       reason: 'busy'
     }
   }
+
+  recordAiNpcLifeCycle(options.npcLife, lifeContext)
+  if (typeof options.npcLife?.updateGoal === 'function') options.npcLife.updateGoal(lifeContext)
 
   const state = createAiNpcState(bot, options)
   const runPlanner = options.runPlanner || createAiNpcPlannerRunner({
@@ -385,6 +458,11 @@ async function runAiNpcCycle (bot, options = {}) {
   const response = await runPlanner(state, createAiNpcPrompt(state))
   const instruction = parseAiNpcInstruction(response)
   const execution = await executeAiNpcInstruction(bot, instruction, options)
+  const lifeEvent = executionLifeEvent(instruction, execution, lifeContext.now)
+  if (lifeEvent && typeof options.npcLife?.record === 'function') {
+    options.npcLife.record(lifeEvent)
+    if (typeof options.npcLife?.updateGoal === 'function') options.npcLife.updateGoal(lifeContext)
+  }
   debugLog('aiNpc.response', {
     action: instruction.action,
     ok: execution.ok !== false,
@@ -400,11 +478,6 @@ async function runAiNpcCycle (bot, options = {}) {
 }
 
 function attachAiNpc (bot, options = {}) {
-  const setPlannerInterval = options.setInterval || setInterval
-  const clearPlannerInterval = options.clearInterval || clearInterval
-  const errorOutput = options.errorOutput || console.error
-  const debugLog = options.debugLog || (() => {})
-  const intervalMs = options.idleIntervalMs ?? AI_NPC_IDLE_INTERVAL_MS
   const state = {
     ...options,
     runPlanner: options.runPlanner || createAiNpcPlannerRunner({
@@ -427,20 +500,9 @@ function attachAiNpc (bot, options = {}) {
     }
   }
 
-  const timer = setPlannerInterval(() => {
-    runNow().catch(err => {
-      errorOutput(`AI NPC planner error: ${err.message}`)
-      if (err.stderr) errorOutput(err.stderr)
-      debugLog('aiNpc.error', { message: err.message, stderr: err.stderr })
-    })
-  }, intervalMs)
-
-  if (typeof timer?.unref === 'function') timer.unref()
-
   function stop () {
     if (stopped) return
     stopped = true
-    clearPlannerInterval(timer)
   }
 
   bot.once?.('end', stop)
