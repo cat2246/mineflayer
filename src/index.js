@@ -29,6 +29,7 @@ module.exports = {
   ...require('./places'),
   ...require('./profileStore'),
   ...require('./pyroFarming'),
+  ...require('./startupHome'),
   ...require('./survival'),
   ...require('./startMenu'),
   ...require('./viewer'),

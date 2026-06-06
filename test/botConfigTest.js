@@ -101,6 +101,7 @@ describe('holocraft bot config', function () {
       '../src/logTerminal',
       '../src/nightSafety',
       '../src/npcLife',
+      '../src/startupHome',
       '../src/viewer'
     ]
     const originals = new Map()
@@ -189,6 +190,12 @@ describe('holocraft bot config', function () {
         return { name: 'npc-life' }
       }
     })
+    stubModule('../src/startupHome', {
+      attachStartupHomeFlow: (bot, options) => {
+        calls.startupHome = options
+        return { stop: () => {} }
+      }
+    })
     stubModule('../src/viewer', { closeViewer: () => {} })
 
     const createBotPath = require.resolve('../src/createBot')
@@ -240,6 +247,7 @@ describe('holocraft bot config', function () {
     assert.strictEqual(calls.deathRecovery.placesPath, expected.placesPath)
     assert.strictEqual(calls.nightSafety.containerMemoryPath, expected.containerMemoryPath)
     assert.strictEqual(calls.nightSafety.placesPath, expected.placesPath)
+    assert.strictEqual(calls.startupHome.placesPath, expected.placesPath)
     assert.strictEqual(calls.console.debugLogPath, expected.debugLogPath)
     assert.strictEqual(calls.logTerminal.logPath, expected.debugLogPath)
     assert.strictEqual(calls.automation.containerMemoryPath, expected.containerMemoryPath)
@@ -910,6 +918,28 @@ describe('holocraft bot config', function () {
       ['startViewer'],
       ['physicsEnabled', 1, true],
       ['joinSurvivalWorld', true]
+    ])
+  })
+
+  it('emits survivalJoined after joining Survival on first spawn', async () => {
+    const { attachEventLogging } = require('../bot')
+    const bot = new EventEmitter()
+    const events = []
+    bot.physicsEnabled = false
+    bot.on('survivalJoined', data => events.push(['survivalJoined', data.spawnCount]))
+
+    attachEventLogging(bot, {
+      joinSurvivalWorld: async () => events.push(['joinSurvivalWorld']),
+      startViewer: () => events.push(['startViewer'])
+    })
+
+    bot.emit('spawn')
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [
+      ['startViewer'],
+      ['joinSurvivalWorld'],
+      ['survivalJoined', 1]
     ])
   })
 
@@ -8705,6 +8735,118 @@ describe('holocraft bot config', function () {
 
     assert(entries.some(entry => entry.event === 'homes.window'))
     assert(entries.some(entry => entry.event === 'homes.detected'))
+  })
+
+  it('returns to remembered home during startup home flow', async () => {
+    const { rememberPlaceCoordinates, runStartupHomeFlow } = require('../bot')
+    const placesPath = tempPlacesPath()
+    const bot = new EventEmitter()
+    const messages = []
+    const debugEntries = []
+    bot.username = 'LifeBot'
+    bot.entity = { position: combatPosition(100, 64, 100) }
+    bot.game = { dimension: 'minecraft:overworld' }
+    bot.health = 20
+    bot.food = 20
+    bot.chat = message => messages.push(message)
+
+    rememberPlaceCoordinates(bot, 'home', combatPosition(10, 64, 10), { placesPath })
+
+    const result = await runStartupHomeFlow(bot, {
+      debugLog: (event, data) => debugEntries.push([event, data]),
+      placesPath,
+      sleep: async () => {
+        throw new Error('known home should not wait for rtp landing')
+      }
+    })
+
+    assert.strictEqual(result.action, 'go_home')
+    assert.deepStrictEqual(messages, ['/home home'])
+    assert(debugEntries.some(([event]) => event === 'startupHome.goHome'))
+  })
+
+  it('uses rtp, sets home, and remembers coordinates when no home exists', async () => {
+    const { readPlaceCoordinates, runStartupHomeFlow } = require('../bot')
+    const placesPath = tempPlacesPath()
+    const bot = new EventEmitter()
+    const messages = []
+    const sleeps = []
+    bot.username = 'LifeBot'
+    bot.entity = { position: combatPosition(45, 70, -12) }
+    bot.game = { dimension: 'minecraft:overworld' }
+    bot.health = 20
+    bot.food = 20
+    bot.chat = message => messages.push(message)
+
+    const result = await runStartupHomeFlow(bot, {
+      placesPath,
+      rtpSettleMs: 250,
+      sleep: async ms => {
+        sleeps.push(ms)
+        bot.entity.position = combatPosition(80, 71, -30)
+      }
+    })
+
+    assert.strictEqual(result.action, 'set_home')
+    assert.deepStrictEqual(messages, ['/rtp', '/sethome home'])
+    assert.deepStrictEqual(sleeps, [250])
+    assert.deepStrictEqual(readPlaceCoordinates('home', { placesPath }).position, {
+      x: 80,
+      y: 71,
+      z: -30
+    })
+  })
+
+  it('does not set home after rtp when the landing is unsafe', async () => {
+    const { readPlaceCoordinates, runStartupHomeFlow } = require('../bot')
+    const placesPath = tempPlacesPath()
+    const bot = new EventEmitter()
+    const messages = []
+    bot.username = 'LifeBot'
+    bot.entity = { position: combatPosition(45, 70, -12) }
+    bot.game = { dimension: 'minecraft:overworld' }
+    bot.health = 0
+    bot.food = 20
+    bot.chat = message => messages.push(message)
+
+    const result = await runStartupHomeFlow(bot, {
+      placesPath,
+      rtpSettleMs: 0,
+      sleep: async () => {}
+    })
+
+    assert.strictEqual(result.action, 'rtp')
+    assert.strictEqual(result.ok, false)
+    assert.strictEqual(result.reason, 'unsafe-landing')
+    assert.deepStrictEqual(messages, ['/rtp'])
+    assert.strictEqual(readPlaceCoordinates('home', { placesPath }), null)
+  })
+
+  it('runs startup home flow once after survival is joined', async () => {
+    const { attachStartupHomeFlow } = require('../bot')
+    const bot = new EventEmitter()
+    const calls = []
+    const debugEntries = []
+
+    const controller = attachStartupHomeFlow(bot, {
+      debugLog: (event, data) => debugEntries.push([event, data]),
+      runStartupHomeFlow: async (receivedBot, options) => {
+        calls.push([receivedBot, options.reason])
+        return { ok: true, action: 'noop' }
+      }
+    })
+
+    bot.emit('survivalJoined', { spawnCount: 1 })
+    await new Promise(resolve => setImmediate(resolve))
+    bot.emit('survivalJoined', { spawnCount: 2 })
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.strictEqual(calls.length, 1)
+    assert.strictEqual(calls[0][0], bot)
+    assert.strictEqual(calls[0][1], 'survival-joined')
+    assert(debugEntries.some(([event]) => event === 'startupHome.complete'))
+
+    controller.stop()
   })
 
   it('does not schedule the idle NPC planner automatically', () => {

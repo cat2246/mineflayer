@@ -19,6 +19,7 @@ const { attachKnockbackPause } = require('./knockbackPause')
 const { startLogTerminal } = require('./logTerminal')
 const { attachNightSafety } = require('./nightSafety')
 const { createNpcLifeController } = require('./npcLife')
+const { attachStartupHomeFlow } = require('./startupHome')
 const { closeViewer } = require('./viewer')
 
 const RECONNECT_DELAY_MS = 180000
@@ -158,6 +159,7 @@ function createBot (options = buildBotOptions(), runtimeOptions = {}) {
   const followController = attachFollowController(bot, { debugLog })
   const knockbackController = attachKnockbackPause(bot, { debugLog })
   const nightSafetyController = attachNightSafety(bot, { ...memoryOptions, debugLog, automationManager })
+  const startupHomeController = attachStartupHomeFlow(bot, { ...memoryOptions, debugLog })
   startConsole(bot, { ...memoryOptions, debugLog, automationManager, followController, knockbackController, nightSafetyController })
   attachCombat(bot, { debugLog })
   attachAiChat(bot, { ...memoryOptions, debugLog, automationManager })
@@ -177,6 +179,7 @@ function createBot (options = buildBotOptions(), runtimeOptions = {}) {
   })
   attachShutdownHandlers(bot, runtimeOptions.shutdownSignals)
   if (logTerminal) bot.__logTerminal = logTerminal
+  bot.__startupHomeController = startupHomeController
   bot.__aiNpcController = aiNpcController
   bot.__aiNpcScheduler = aiNpcScheduler
   return bot

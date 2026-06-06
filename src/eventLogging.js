@@ -28,6 +28,12 @@ function enablePhysics (bot, debugLog, spawnCount) {
   }
 }
 
+function emitSurvivalJoined (bot, spawnCount, reason) {
+  if (typeof bot.emit === 'function') {
+    bot.emit('survivalJoined', { spawnCount, reason })
+  }
+}
+
 function isSafeMinecraftUsername (username) {
   return /^[A-Za-z0-9_]{3,16}$/.test(String(username || ''))
 }
@@ -167,6 +173,7 @@ function attachEventLogging (bot, options = {}) {
       try {
         enablePhysics(bot, debugLog, spawnCount)
         await joinWorld(bot)
+        emitSurvivalJoined(bot, spawnCount, 'spawn')
         console.log('Sent /survival command')
         debugLog('command.sent', { command: '/survival' })
       } catch (err) {
@@ -181,6 +188,7 @@ function attachEventLogging (bot, options = {}) {
     await enablePhysicsAfterDelay(bot, wait, debugLog, spawnCount)
     try {
       await joinWorld(bot)
+      emitSurvivalJoined(bot, spawnCount, 'spawn-recovery')
       console.log('Sent /survival command')
       debugLog('command.sent', { command: '/survival', reason: 'spawn-recovery' })
     } catch (err) {
@@ -256,6 +264,7 @@ function attachEventLogging (bot, options = {}) {
 
 module.exports = {
   attachEventLogging,
+  emitSurvivalJoined,
   isIgnorableParticleDecodeError,
   isSafeMinecraftUsername
 }
