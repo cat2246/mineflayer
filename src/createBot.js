@@ -125,7 +125,7 @@ function createBot (options = buildBotOptions(), runtimeOptions = {}) {
   const nightSafetyController = attachNightSafety(bot, { debugLog, automationManager })
   startConsole(bot, { debugLog, automationManager, followController, knockbackController, nightSafetyController })
   attachCombat(bot, { debugLog })
-  attachAiChat(bot, { debugLog })
+  attachAiChat(bot, { debugLog, automationManager })
   const npcLife = createNpcLifeController()
   attachAiNpc(bot, { debugLog, automationManager, followController, npcLife })
   attachErrorLogMonitor(bot, { debugLog })

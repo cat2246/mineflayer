@@ -23,6 +23,7 @@ const DEFAULT_AGENT_TPA_COOLDOWN_MS = 30000
 const DEFAULT_AGENT_COMMAND_RESULT_WAIT_MS = 1500
 const DEFAULT_AGENT_COMMAND_MAX_MESSAGES = 8
 const DEFAULT_QUIZ_ANSWER_TIMEOUT_MS = 120000
+const DEFAULT_NEARBY_PLAYER_CHAT_RANGE = 15
 const DEFAULT_CODEX_CONFIG_PATH = path.join(os.homedir(), '.codex', 'config.toml')
 const DEFAULT_CODEX_CHAT_WORKSPACE = path.join(os.tmpdir(), 'mineflayer-codex-chat')
 
@@ -460,6 +461,85 @@ function mentionsBot (botName, message, aliases = []) {
     const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     return new RegExp(`(^|\\W)${escapedName}(\\W|$)`, 'i').test(message)
   })
+}
+
+function findVisiblePlayerEntity (bot, username) {
+  if (!bot || !username) return null
+  const playerEntity = bot.players?.[username]?.entity
+  if (playerEntity?.position) return playerEntity
+
+  const requested = String(username).toLowerCase()
+  return Object.values(bot.entities || {}).find(entity =>
+    entity?.type === 'player' &&
+    entity?.position &&
+    String(entity.username || '').toLowerCase() === requested
+  ) || null
+}
+
+function distanceBetweenPositions (first, second) {
+  if (!first || !second) return Infinity
+  if (typeof first.distanceTo === 'function') return first.distanceTo(second)
+
+  return Math.sqrt(
+    Math.pow(Number(first.x) - Number(second.x), 2) +
+    Math.pow(Number(first.y) - Number(second.y), 2) +
+    Math.pow(Number(first.z) - Number(second.z), 2)
+  )
+}
+
+function isPlayerWithinChatRange (bot, username, range = DEFAULT_NEARBY_PLAYER_CHAT_RANGE) {
+  const botPosition = bot?.entity?.position
+  const playerEntity = findVisiblePlayerEntity(bot, username)
+  if (!botPosition || !playerEntity?.position) return false
+  return distanceBetweenPositions(botPosition, playerEntity.position) <= range
+}
+
+function playerLookPosition (entity) {
+  const position = entity?.position
+  if (!position) return null
+  if (typeof position.offset === 'function') return position.offset(0, 1.6, 0)
+  return {
+    x: position.x,
+    y: position.y + 1.6,
+    z: position.z
+  }
+}
+
+function isPathfinderBusy (bot) {
+  if (typeof bot?.pathfinder?.isMoving === 'function' && bot.pathfinder.isMoving()) return true
+  return Boolean(bot?.pathfinder?.goal)
+}
+
+function canLookAtNearbyPlayer (bot, state) {
+  const nowMs = currentTimeMs(state.now)
+  if (
+    bot._ended ||
+    bot.currentWindow ||
+    bot.isSleeping ||
+    bot.__autoEating ||
+    bot.__nightSafetyActive ||
+    bot.pvp?.target ||
+    (bot.__combatActiveUntil && bot.__combatActiveUntil > nowMs) ||
+    (bot.__movementPausedUntil && bot.__movementPausedUntil > nowMs) ||
+    isPathfinderBusy(bot)
+  ) return false
+
+  if (typeof state.automationManager?.isIdle === 'function' && !state.automationManager.isIdle()) return false
+  return typeof bot.lookAt === 'function'
+}
+
+function lookAtNearbyPlayer (bot, username, state) {
+  if (!canLookAtNearbyPlayer(bot, state)) return false
+  const lookPosition = playerLookPosition(findVisiblePlayerEntity(bot, username))
+  if (!lookPosition) return false
+
+  Promise.resolve(bot.lookAt(lookPosition, false)).catch(err => {
+    ;(state.debugLog || (() => {}))('aiChat.nearbyLook.error', {
+      username,
+      message: err.message
+    })
+  })
+  return true
 }
 
 function isParsedWhisperTail (botName, message) {
@@ -1335,6 +1415,8 @@ function attachAiChat (bot, options = {}) {
     errorOutput: options.errorOutput,
     now: options.now,
     sleep: options.sleep,
+    automationManager: options.automationManager,
+    nearbyPlayerChatRange: options.nearbyPlayerChatRange ?? DEFAULT_NEARBY_PLAYER_CHAT_RANGE,
     agentToolSpawnWaitMs: options.agentToolSpawnWaitMs,
     agentToolMeetRange: options.agentToolMeetRange,
     agentTpaCooldownMs: options.agentTpaCooldownMs
@@ -1378,14 +1460,18 @@ function attachAiChat (bot, options = {}) {
 
   function handlePublicMessage (username, message, source = 'chat') {
     const botName = state.botName || bot.username
+    const mentioned = mentionsBot(botName, message, state.botMentionAliases)
+    const nearby = isPlayerWithinChatRange(bot, username, state.nearbyPlayerChatRange)
     if (
       !username ||
       username === bot.username ||
       isServerAnnouncementUsername(username) ||
       isParsedWhisperTail(botName, message) ||
-      !mentionsBot(botName, message, state.botMentionAliases) ||
+      (!mentioned && !nearby) ||
       !shouldProcessPublicRequest(username, message)
     ) return
+
+    if (nearby) lookAtNearbyPlayer(bot, username, state)
 
     const request = {
       channel: 'public',
@@ -1458,6 +1544,8 @@ module.exports = {
   loadConfiguredCodexCliPath,
   loadMemory,
   loadTools,
+  findVisiblePlayerEntity,
+  isPlayerWithinChatRange,
   mentionsBot,
   parseRawPublicChatMessage
 }

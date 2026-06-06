@@ -3157,6 +3157,109 @@ describe('holocraft bot config', function () {
     assert(requests[0].tools.includes('run_server_command'))
   })
 
+  it('lets visible nearby players talk without mentioning the bot', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const requests = []
+    const bot = new EventEmitter()
+    bot.username = 'TestBot123'
+    bot.entity = { position: combatPosition(0, 64, 0) }
+    bot.players = {
+      Alex: {
+        entity: {
+          position: combatPosition(10, 64, 0)
+        }
+      }
+    }
+    bot.chat = message => events.push(['chat', message])
+    bot.lookAt = async point => events.push(['lookAt', point.x, point.y, point.z])
+
+    attachAiChat(bot, {
+      memoryEnabled: false,
+      runCodex: async request => {
+        requests.push(request)
+        return 'I can hear you from here.'
+      }
+    })
+
+    bot.emit('chat', 'Alex', 'can you hear me?')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.strictEqual(requests.length, 1)
+    assert.strictEqual(requests[0].username, 'Alex')
+    assert.deepStrictEqual(events[0], ['lookAt', 10, 65.6, 0])
+    assert.deepStrictEqual(events[1], ['chat', '@Alex I can hear you from here.'])
+  })
+
+  it('ignores far public chat that does not mention the bot', async () => {
+    const { attachAiChat } = require('../bot')
+    const requests = []
+    const bot = new EventEmitter()
+    bot.username = 'TestBot123'
+    bot.entity = { position: combatPosition(0, 64, 0) }
+    bot.players = {
+      Alex: {
+        entity: {
+          position: combatPosition(16, 64, 0)
+        }
+      }
+    }
+    bot.chat = () => {}
+    bot.lookAt = async () => {
+      throw new Error('far players should not trigger lookAt')
+    }
+
+    attachAiChat(bot, {
+      memoryEnabled: false,
+      runCodex: async request => {
+        requests.push(request)
+        return 'This should not happen.'
+      }
+    })
+
+    bot.emit('chat', 'Alex', 'can you hear me?')
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.strictEqual(requests.length, 0)
+  })
+
+  it('does not look at nearby players while automation is active', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const requests = []
+    const bot = new EventEmitter()
+    bot.username = 'TestBot123'
+    bot.entity = { position: combatPosition(0, 64, 0) }
+    bot.players = {
+      Alex: {
+        entity: {
+          position: combatPosition(5, 64, 0)
+        }
+      }
+    }
+    bot.chat = message => events.push(['chat', message])
+    bot.lookAt = async () => events.push(['lookAt'])
+
+    attachAiChat(bot, {
+      automationManager: {
+        isIdle: () => false
+      },
+      memoryEnabled: false,
+      runCodex: async request => {
+        requests.push(request)
+        return 'I can answer while my hands are busy.'
+      }
+    })
+
+    bot.emit('chat', 'Alex', 'you busy?')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.strictEqual(requests.length, 1)
+    assert.deepStrictEqual(events, [['chat', '@Alex I can answer while my hands are busy.']])
+  })
+
   it('does not advertise disconnect, reconnect, or password-change capabilities in default tools', () => {
     const { defaultToolsText } = require('../bot')
     const tools = defaultToolsText()
