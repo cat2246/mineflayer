@@ -8,6 +8,7 @@ const {
 } = require('./aiChat')
 const { recordMissingFunction } = require('./issueRecorder')
 const { resolveBotMemoryPaths } = require('./botMemory')
+const { executeAiNpcTool, listAiNpcTools } = require('./aiNpcTools')
 
 const DEFAULT_AI_NPC_MAX_BUFFER = 1024 * 1024
 const DEFAULT_AI_NPC_CHAT_MAX_LENGTH = 160
@@ -140,6 +141,7 @@ function createAiNpcPrompt (state) {
     '',
     'Allowed instructions:',
     '{"action":"noop","reason":"short reason"}',
+    '{"action":"tool","tool":"observe_world","args":{},"reason":"short reason"}',
     '{"action":"start_automation","automation":"Mining","reason":"short reason"}',
     '{"action":"follow_player","player":"Steve","reason":"short reason"}',
     '{"action":"run_server_command","command":"/spawn","reason":"short reason"}',
@@ -148,6 +150,7 @@ function createAiNpcPrompt (state) {
     '',
     'Rules:',
     '- Choose noop if the state is unsafe, boring, unclear, or already busy.',
+    `- Registered tools: ${listAiNpcTools().map(tool => tool.name).join(', ')}.`,
     '- Use only automation names from state.automations.',
     ...lifeRules,
     '- Do not greet every online player or spam chat.',
@@ -255,6 +258,12 @@ function parseAiNpcInstruction (response) {
 
   if (action === 'start_automation') {
     instruction.automation = cleanShortText(parsed.automation || parsed.name, 80)
+  } else if (action === 'tool' || action === 'use_tool') {
+    instruction.action = 'tool'
+    instruction.tool = cleanShortText(parsed.tool || parsed.name, 80)
+    instruction.args = parsed.args && typeof parsed.args === 'object' && !Array.isArray(parsed.args)
+      ? parsed.args
+      : {}
   } else if (action === 'follow_player') {
     instruction.player = cleanShortText(parsed.player || parsed.target, 80)
   } else if (action === 'run_server_command') {
@@ -341,6 +350,14 @@ async function executeAiNpcInstruction (bot, instruction, options = {}) {
   if (action === 'noop') {
     debugLog('aiNpc.noop', { reason: instruction.reason })
     return { ok: true, action: 'noop', reason: instruction.reason }
+  }
+
+  if (action === 'tool') {
+    return executeAiNpcTool(bot, {
+      tool: instruction.tool,
+      args: instruction.args,
+      reason: instruction.reason
+    }, options)
   }
 
   if (action === 'start_automation') {

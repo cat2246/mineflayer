@@ -2,6 +2,7 @@ module.exports = {
   ...require('./aiChat'),
   ...require('./aiNpc'),
   ...require('./aiNpcScheduler'),
+  ...require('./aiNpcTools'),
   ...require('./automations'),
   ...require('./autoEat'),
   ...require('./botMemory'),

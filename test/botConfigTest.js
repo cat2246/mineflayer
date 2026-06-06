@@ -9379,6 +9379,154 @@ describe('holocraft bot config', function () {
     assert.strictEqual(result.execution.toolResult.command, '/spawn')
   })
 
+  it('lists initial AI NPC tools from the registry', () => {
+    const { listAiNpcTools } = require('../bot')
+
+    assert.deepStrictEqual(listAiNpcTools().map(tool => tool.name), [
+      'observe_world',
+      'inspect_inventory',
+      'run_safe_command',
+      'rtp',
+      'set_home',
+      'go_home',
+      'remember_place',
+      'write_memory_event',
+      'record_missing_tool',
+      'read_missing_tools'
+    ])
+  })
+
+  it('validates AI NPC tool calls before execution', () => {
+    const { validateAiNpcToolCall } = require('../bot')
+
+    assert.deepStrictEqual(validateAiNpcToolCall({
+      tool: 'run_safe_command',
+      args: { command: '/spawn' }
+    }), {
+      ok: true,
+      tool: 'run_safe_command',
+      args: { command: '/spawn' }
+    })
+
+    assert.deepStrictEqual(validateAiNpcToolCall({
+      tool: 'run_safe_command',
+      args: { command: '/kick Steve' }
+    }), {
+      ok: false,
+      tool: 'run_safe_command',
+      reason: 'command-not-allowed'
+    })
+
+    assert.deepStrictEqual(validateAiNpcToolCall({
+      tool: 'mine_block_or_vein',
+      args: { blockType: 'iron_ore' }
+    }), {
+      ok: false,
+      tool: 'mine_block_or_vein',
+      reason: 'unknown-tool'
+    })
+  })
+
+  it('executes registered AI NPC tools with normalized results', async () => {
+    const { executeAiNpcTool, readPlaceCoordinates } = require('../bot')
+    const placesPath = tempPlacesPath()
+    const eventLogPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'npc-events-')), 'event-log.jsonl')
+    const bot = new EventEmitter()
+    const messages = []
+    bot.username = 'LifeBot'
+    bot.health = 20
+    bot.food = 18
+    bot.time = { isDay: true, timeOfDay: 1000 }
+    bot.game = { dimension: 'minecraft:overworld' }
+    bot.entity = { position: combatPosition(3, 64, 9) }
+    bot.inventory = {
+      emptySlotCount: () => 30,
+      items: () => [{ name: 'oak_log', count: 8 }]
+    }
+    bot.players = {}
+    bot.chat = message => messages.push(message)
+
+    const observe = await executeAiNpcTool(bot, { tool: 'observe_world', args: {} }, { placesPath, eventLogPath })
+    const inventory = await executeAiNpcTool(bot, { tool: 'inspect_inventory', args: {} }, { placesPath, eventLogPath })
+    const setHome = await executeAiNpcTool(bot, { tool: 'set_home', args: { name: 'home' } }, { placesPath, eventLogPath })
+    const event = await executeAiNpcTool(bot, {
+      tool: 'write_memory_event',
+      args: { type: 'note', message: 'Started a life.' }
+    }, { placesPath, eventLogPath })
+
+    assert.strictEqual(observe.ok, true)
+    assert.strictEqual(observe.result.bot.username, 'LifeBot')
+    assert.strictEqual(inventory.result.items[0].name, 'oak_log')
+    assert.strictEqual(setHome.ok, true)
+    assert.deepStrictEqual(messages, ['/sethome home'])
+    assert.deepStrictEqual(readPlaceCoordinates('home', { placesPath }).position, {
+      x: 3,
+      y: 64,
+      z: 9
+    })
+    assert.strictEqual(event.ok, true)
+    assert(fs.readFileSync(eventLogPath, 'utf8').includes('"type":"note"'))
+  })
+
+  it('records unknown AI NPC tools into the missing-tool backlog', async () => {
+    const { executeAiNpcTool, readMissingTools } = require('../bot')
+    const botMemoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bot-memory-'))
+    const bot = new EventEmitter()
+    bot.username = 'LifeBot'
+
+    const result = await executeAiNpcTool(bot, {
+      tool: 'mine_block_or_vein',
+      args: { blockType: 'iron_ore' },
+      reason: 'Need iron for gear.'
+    }, {
+      botMemoryRoot
+    })
+
+    const records = readMissingTools({
+      missingToolsPath: path.join(botMemoryRoot, 'lifebot', 'missing-tools.json')
+    })
+
+    assert.strictEqual(result.ok, false)
+    assert.strictEqual(result.reason, 'unknown-tool')
+    assert.strictEqual(records.length, 1)
+    assert.strictEqual(records[0].desiredTool, 'mine_block_or_vein')
+    assert.strictEqual(records[0].blockedGoal, 'Need iron for gear.')
+  })
+
+  it('executes registered tool calls from idle NPC planner instructions', async () => {
+    const { runAiNpcCycle } = require('../bot')
+    const bot = new EventEmitter()
+    const messages = []
+    bot.username = 'LifeBot'
+    bot.health = 20
+    bot.food = 20
+    bot.time = { isDay: true, timeOfDay: 1000 }
+    bot.players = {}
+    bot.chat = message => messages.push(message)
+
+    const result = await runAiNpcCycle(bot, {
+      automationManager: {
+        getStatus: () => ({ active: null }),
+        isIdle: () => true,
+        list: () => []
+      },
+      followController: {
+        getStatus: () => ({ followedPlayerName: null }),
+        isIdle: () => true
+      },
+      runPlanner: async () => ({
+        action: 'tool',
+        tool: 'rtp',
+        args: {},
+        reason: 'fresh start'
+      })
+    })
+
+    assert.strictEqual(result.instruction.action, 'tool')
+    assert.strictEqual(result.execution.tool, 'rtp')
+    assert.deepStrictEqual(messages, ['/rtp'])
+  })
+
   it('blocks dangerous server commands from idle NPC planner instructions', async () => {
     const { runAiNpcCycle } = require('../bot')
     const bot = new EventEmitter()
