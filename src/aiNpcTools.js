@@ -1,5 +1,6 @@
 const fs = require('fs')
 const path = require('path')
+const vec3 = require('vec3')
 const { resolveBotMemoryPaths } = require('./botMemory')
 const {
   containerItems,
@@ -9,27 +10,39 @@ const {
 } = require('./containers')
 const { readMissingTools, recordMissingTool, recordSharedMissingTool } = require('./missingTools')
 const { readPlaceCoordinates, rememberPlaceCoordinates } = require('./places')
+const { readRecipeKnowledge, summarizeRecipeKnowledge, upsertLearnedRecipe } = require('./recipeKnowledge')
 
 const MAX_TOOL_TEXT_LENGTH = 160
 const SAFE_PLACE_NAME = /^[A-Za-z0-9_-]{1,32}$/
-const SAFE_CRAFT_RECIPES = {
-  crafting_table: [
-    { label: 'wood', names: ['oak_log', 'spruce_log', 'birch_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log', 'crimson_stem', 'warped_stem', 'oak_planks', 'spruce_planks', 'birch_planks', 'jungle_planks', 'acacia_planks', 'dark_oak_planks', 'mangrove_planks', 'cherry_planks', 'crimson_planks', 'warped_planks'], count: 1 }
-  ],
-  stick: [
-    { label: 'planks', names: ['oak_planks', 'spruce_planks', 'birch_planks', 'jungle_planks', 'acacia_planks', 'dark_oak_planks', 'mangrove_planks', 'cherry_planks', 'crimson_planks', 'warped_planks'], count: 2 }
-  ],
-  torch: [
-    { label: 'coal', names: ['coal', 'charcoal'], count: 1 },
-    { label: 'stick', names: ['stick'], count: 1 }
-  ],
-  chest: [
-    { label: 'planks', names: ['oak_planks', 'spruce_planks', 'birch_planks', 'jungle_planks', 'acacia_planks', 'dark_oak_planks', 'mangrove_planks', 'cherry_planks', 'crimson_planks', 'warped_planks'], count: 8 }
-  ],
-  furnace: [
-    { label: 'cobblestone', names: ['cobblestone', 'blackstone', 'cobbled_deepslate'], count: 8 }
-  ]
-}
+const BUILDING_SAFETY_POLICY = 'home_improvement'
+const DEFAULT_BUILDING_HOME_RADIUS = 12
+const SAFE_BUILDING_BLOCK_NAMES = new Set([
+  'cobblestone',
+  'dirt',
+  'glass',
+  'oak_planks',
+  'spruce_planks',
+  'birch_planks',
+  'jungle_planks',
+  'acacia_planks',
+  'dark_oak_planks',
+  'mangrove_planks',
+  'cherry_planks',
+  'torch'
+])
+const PROTECTED_BUILDING_BLOCK_PATTERN = /(chest|barrel|furnace|bed|door|glass|pane|log|wood|leaves|torch|lantern|sign|rail|spawner|water|lava|bedrock)/i
+const SIMPLE_SHELTER_OFFSETS = [
+  { x: 1, y: 1, z: 0 },
+  { x: -1, y: 1, z: 0 },
+  { x: 0, y: 1, z: 1 },
+  { x: 0, y: 1, z: -1 }
+]
+const LIGHT_AREA_OFFSETS = [
+  { x: 1, y: 1, z: 0 },
+  { x: -1, y: 1, z: 0 },
+  { x: 0, y: 1, z: 1 },
+  { x: 0, y: 1, z: -1 }
+]
 const FOOD_ITEM_NAMES = new Set([
   'apple',
   'baked_potato',
@@ -246,8 +259,15 @@ function validateCraftItemArgs (args) {
   const item = sanitizeItemNames(args.item || args.items)[0]
   const count = positiveIntegerOrNull(args.count) || 1
   if (!item) return { ok: false, reason: 'missing-item' }
-  if (!SAFE_CRAFT_RECIPES[item]) return { ok: false, reason: 'unsafe-recipe' }
-  if (count > 16) return { ok: false, reason: 'craft-count-too-large' }
+  if (count > 64) return { ok: false, reason: 'craft-count-too-large' }
+  return { ok: true, args: { item, count } }
+}
+
+function validateRecipeItemArgs (args) {
+  const item = sanitizeItemNames(args.item || args.items)[0]
+  const count = positiveIntegerOrNull(args.count) || 1
+  if (!item) return { ok: false, reason: 'missing-item' }
+  if (count > 64) return { ok: false, reason: 'recipe-count-too-large' }
   return { ok: true, args: { item, count } }
 }
 
@@ -262,6 +282,66 @@ function validateFurnaceItemArgs (args) {
   if (!item) return { ok: false, reason: 'missing-item' }
   if (!SAFE_SMELT_ITEM_NAMES.has(item)) return { ok: false, reason: 'unsafe-smelt-item' }
   return { ok: true, args: { item, count } }
+}
+
+function normalizePositionArg (value) {
+  if (!value || typeof value !== 'object') return null
+  const x = Number(value.x)
+  const y = Number(value.y)
+  const z = Number(value.z)
+  if (![x, y, z].every(Number.isFinite)) return null
+  return { x: Math.round(x), y: Math.round(y), z: Math.round(z) }
+}
+
+function validateBuildingSafetyPolicy (args) {
+  const safetyPolicy = compactText(args.safetyPolicy || args.safety_policy, '', 40)
+  return safetyPolicy === BUILDING_SAFETY_POLICY ? safetyPolicy : null
+}
+
+function validateBuildingPositionArgs (args, options = {}) {
+  const safetyPolicy = validateBuildingSafetyPolicy(args)
+  if (!safetyPolicy) return { ok: false, reason: 'safety-policy-required' }
+  const position = normalizePositionArg(args.position || args.target)
+  if (!position) return { ok: false, reason: 'missing-position' }
+  return { ok: true, args: { ...options, position, safetyPolicy } }
+}
+
+function validatePlaceBlockArgs (args) {
+  const item = sanitizeItemNames(args.item || args.block)[0]
+  if (!item) return { ok: false, reason: 'missing-item' }
+  if (!SAFE_BUILDING_BLOCK_NAMES.has(item)) return { ok: false, reason: 'unsafe-building-block' }
+  return validateBuildingPositionArgs(args, { item })
+}
+
+function validateDigBlockArgs (args) {
+  return validateBuildingPositionArgs(args)
+}
+
+function validateShelterArgs (args) {
+  const safetyPolicy = validateBuildingSafetyPolicy(args)
+  if (!safetyPolicy) return { ok: false, reason: 'safety-policy-required' }
+  const item = sanitizeItemNames(args.item || args.block)[0] || 'cobblestone'
+  if (!SAFE_BUILDING_BLOCK_NAMES.has(item) || item === 'torch') return { ok: false, reason: 'unsafe-building-block' }
+  return { ok: true, args: { item, safetyPolicy } }
+}
+
+function validateLightAreaArgs (args) {
+  const safetyPolicy = validateBuildingSafetyPolicy(args)
+  if (!safetyPolicy) return { ok: false, reason: 'safety-policy-required' }
+  return { ok: true, args: { item: 'torch', safetyPolicy } }
+}
+
+function validateRepairShelterArgs (args) {
+  const safetyPolicy = validateBuildingSafetyPolicy(args)
+  if (!safetyPolicy) return { ok: false, reason: 'safety-policy-required' }
+  const item = sanitizeItemNames(args.item || args.block)[0] || 'cobblestone'
+  if (!SAFE_BUILDING_BLOCK_NAMES.has(item) || item === 'torch') return { ok: false, reason: 'unsafe-building-block' }
+  const holes = (Array.isArray(args.holes) ? args.holes : [args.position || args.target])
+    .map(normalizePositionArg)
+    .filter(Boolean)
+    .slice(0, 8)
+  if (holes.length === 0) return { ok: false, reason: 'missing-position' }
+  return { ok: true, args: { item, holes, safetyPolicy } }
 }
 
 function passArgs (args) {
@@ -280,20 +360,65 @@ function inventoryItems (bot) {
   return typeof bot.inventory?.items === 'function' ? bot.inventory.items() : []
 }
 
-function inventoryCountForNames (bot, names) {
-  return inventoryItems(bot)
-    .filter(item => itemMatchesAnyName(item, names))
-    .reduce((sum, item) => sum + item.count, 0)
-}
-
-function recipeMissingIngredients (bot, recipeName, multiplier = 1) {
-  return (SAFE_CRAFT_RECIPES[recipeName] || [])
-    .filter(ingredient => inventoryCountForNames(bot, ingredient.names) < ingredient.count * multiplier)
-    .map(ingredient => ingredient.label)
-}
-
 function itemIdByName (bot, itemName) {
   return bot.registry?.itemsByName?.[itemName]?.id ?? null
+}
+
+function itemTypeForRecipe (bot, itemName) {
+  return itemIdByName(bot, itemName)
+}
+
+function itemNameByType (bot, type) {
+  return Object.entries(bot.registry?.itemsByName || {})
+    .find(([, item]) => item?.id === type)?.[0] || null
+}
+
+function recipeRequires (bot, recipe) {
+  if (!Array.isArray(recipe?.delta)) return []
+
+  return [...new Set(recipe.delta
+    .filter(entry => Number(entry?.count) < 0)
+    .map(entry => itemNameByType(bot, entry.id ?? entry.type))
+    .filter(Boolean))]
+    .sort()
+}
+
+function craftOperationCount (recipe, desiredCount) {
+  return Math.max(1, Math.ceil(desiredCount / (recipe.result?.count || 1)))
+}
+
+function recipesAllForTableState (bot, itemType, craftingTable) {
+  if (typeof bot.recipesAll !== 'function') return []
+  const recipes = bot.recipesAll(itemType, null, craftingTable)
+  return Array.isArray(recipes) ? recipes : []
+}
+
+function inspectRecipeState (bot, args) {
+  if (typeof bot.recipesAll !== 'function') return { ok: false, reason: 'recipe-support-unavailable' }
+
+  const itemType = itemTypeForRecipe(bot, args.item)
+  if (itemType === null) {
+    return {
+      item: args.item,
+      count: args.count,
+      known: false,
+      inventoryRecipes: 0,
+      tableRecipes: 0,
+      requiresCraftingTable: false
+    }
+  }
+
+  const inventoryRecipes = recipesAllForTableState(bot, itemType, false)
+  const tableRecipes = recipesAllForTableState(bot, itemType, true)
+
+  return {
+    item: args.item,
+    count: args.count,
+    known: inventoryRecipes.length > 0 || tableRecipes.length > 0,
+    inventoryRecipes: inventoryRecipes.length,
+    tableRecipes: tableRecipes.length,
+    requiresCraftingTable: inventoryRecipes.length === 0 && tableRecipes.length > 0
+  }
 }
 
 function findInventoryItem (bot, itemName) {
@@ -326,12 +451,20 @@ function isFurnaceBlockName (name = '') {
   return /^(furnace|smoker|blast_furnace)$/i.test(name)
 }
 
+function isCraftingTableBlockName (name = '') {
+  return name === 'crafting_table'
+}
+
 function findNearbyBlockForTool (bot, predicate, options = {}) {
   const maxDistance = options.searchRadius || options.maxDistance || 8
   if (typeof bot.findBlock === 'function') return bot.findBlock({ matching: predicate, maxDistance })
   if (typeof bot.findBlocks !== 'function') return null
   const position = bot.findBlocks({ matching: predicate, maxDistance, count: 16 })[0]
   return position ? bot.blockAt(position) : null
+}
+
+function findNearbyCraftingTable (bot, options = {}) {
+  return findNearbyBlockForTool(bot, block => isCraftingTableBlockName(block?.name), options)
 }
 
 function recordUnavailableTool (bot, tool, reason, options) {
@@ -346,6 +479,70 @@ function recordUnavailableTool (bot, tool, reason, options) {
     ...options,
     missingToolsPath: options.missingToolsPath || memoryPaths.missingToolsPath
   })
+}
+
+async function executeCraftItem (bot, args, options = {}) {
+  if (typeof bot.recipesFor !== 'function' || typeof bot.craft !== 'function') {
+    return {
+      ok: false,
+      reason: 'crafting-support-unavailable',
+      missingTool: recordUnavailableTool(bot, 'craft_item', 'Bot cannot inspect recipes or craft items.', options)
+    }
+  }
+
+  const memoryPaths = resolveBotMemoryPaths(bot, options)
+  const learnedRecipesPath = options.learnedRecipesPath || memoryPaths.learnedRecipesPath
+  const recipeOptions = { ...options, learnedRecipesPath }
+  const minecraftVersion = compactText(bot.version || bot.registry?.version?.minecraftVersion || '', '', 40)
+
+  const itemType = itemTypeForRecipe(bot, args.item)
+  if (itemType === null) {
+    upsertLearnedRecipe({
+      item: args.item,
+      status: 'failed',
+      minecraftVersion,
+      plan: [],
+      missingIngredients: ['unknown-item']
+    }, recipeOptions)
+    return { ok: false, reason: 'unknown-item', missingIngredients: ['unknown-item'] }
+  }
+
+  const inventoryRecipes = bot.recipesFor(itemType, null, args.count, null)
+  let craftingTable = null
+  let recipe = Array.isArray(inventoryRecipes) ? inventoryRecipes[0] : null
+  if (!recipe) {
+    craftingTable = findNearbyCraftingTable(bot, options)
+    if (craftingTable) {
+      const tableRecipes = bot.recipesFor(itemType, null, args.count, craftingTable)
+      recipe = Array.isArray(tableRecipes) ? tableRecipes[0] : null
+    }
+  }
+  if (!recipe) {
+    const allInventoryRecipes = recipesAllForTableState(bot, itemType, false)
+    const allTableRecipes = recipesAllForTableState(bot, itemType, true)
+    const missingIngredients = allTableRecipes.length > allInventoryRecipes.length
+      ? ['crafting_table_or_ingredients']
+      : ['ingredients']
+
+    upsertLearnedRecipe({
+      item: args.item,
+      status: 'blocked',
+      minecraftVersion,
+      plan: [],
+      missingIngredients
+    }, recipeOptions)
+    return { ok: false, reason: 'missing-ingredients-or-table', missingIngredients }
+  }
+
+  await bot.craft(recipe, craftOperationCount(recipe, args.count), craftingTable)
+  upsertLearnedRecipe({
+    item: args.item,
+    status: 'verified',
+    minecraftVersion,
+    plan: [{ tool: 'craft_item', item: args.item, count: args.count, requires: recipeRequires(bot, recipe) }],
+    missingIngredients: []
+  }, recipeOptions)
+  return { item: args.item, count: args.count }
 }
 
 function furnaceInputCount (item, requestedCount) {
@@ -388,6 +585,146 @@ async function putItemInFurnace (bot, args, options = {}) {
     fuel: fuel.name,
     furnace: containerBlockSnapshot(furnaceBlock)
   }
+}
+
+function buildingHomePosition (bot, options = {}) {
+  return normalizePositionArg(options.homePosition) ||
+    normalizePositionArg(readPlaceCoordinates('home', options)?.position) ||
+    normalizePositionArg(bot.__containerHomeAnchor) ||
+    normalizePositionArg(bot.__nightSafetyHomeAnchor) ||
+    null
+}
+
+function horizontalDistanceBetween (a, b) {
+  return Math.sqrt(
+    Math.pow((a?.x || 0) - (b?.x || 0), 2) +
+    Math.pow((a?.z || 0) - (b?.z || 0), 2)
+  )
+}
+
+function isWithinBuildingHomeRadius (position, homePosition, options = {}) {
+  return horizontalDistanceBetween(position, homePosition) <= (options.buildingHomeRadius ?? DEFAULT_BUILDING_HOME_RADIUS)
+}
+
+function buildingTargetAllowed (bot, position, options = {}) {
+  const homePosition = buildingHomePosition(bot, options)
+  if (!homePosition) return { ok: false, reason: 'missing-home' }
+  if (!isWithinBuildingHomeRadius(position, homePosition, options)) {
+    return { ok: false, reason: 'outside-home-build-radius' }
+  }
+  return { ok: true, homePosition }
+}
+
+function blockAtPosition (bot, position) {
+  if (typeof bot.blockAt !== 'function') return null
+  return bot.blockAt(vec3(position.x, position.y, position.z))
+}
+
+function isAirBlock (block) {
+  return !block || /^(air|cave_air|void_air)$/i.test(block.name || '')
+}
+
+function isProtectedBuildingBlock (block) {
+  return Boolean(block?.name && PROTECTED_BUILDING_BLOCK_PATTERN.test(block.name))
+}
+
+function offsetPosition (position, offset) {
+  return {
+    x: position.x + offset.x,
+    y: position.y + offset.y,
+    z: position.z + offset.z
+  }
+}
+
+function faceVectorFromReference (referencePosition, targetPosition) {
+  return vec3(
+    targetPosition.x - referencePosition.x,
+    targetPosition.y - referencePosition.y,
+    targetPosition.z - referencePosition.z
+  )
+}
+
+function findPlacementReference (bot, targetPosition) {
+  const offsets = [
+    { x: 0, y: -1, z: 0 },
+    { x: 0, y: 1, z: 0 },
+    { x: -1, y: 0, z: 0 },
+    { x: 1, y: 0, z: 0 },
+    { x: 0, y: 0, z: -1 },
+    { x: 0, y: 0, z: 1 }
+  ]
+
+  for (const offset of offsets) {
+    const referencePosition = offsetPosition(targetPosition, offset)
+    const referenceBlock = blockAtPosition(bot, referencePosition)
+    if (isAirBlock(referenceBlock) || isProtectedBuildingBlock(referenceBlock)) continue
+    return {
+      referenceBlock,
+      faceVector: faceVectorFromReference(referencePosition, targetPosition)
+    }
+  }
+  return null
+}
+
+function appendBuildingEvent (bot, type, message, data, options = {}) {
+  const memoryPaths = resolveBotMemoryPaths(bot, options)
+  const eventLogPath = options.eventLogPath || memoryPaths.eventLogPath
+  if (!eventLogPath) return null
+  const event = {
+    at: options.now?.() || Date.now(),
+    source: 'ai-npc-tool',
+    type,
+    message,
+    data
+  }
+  fs.mkdirSync(path.dirname(eventLogPath), { recursive: true })
+  fs.appendFileSync(eventLogPath, `${JSON.stringify(event)}\n`)
+  return event
+}
+
+async function placeBuildingBlock (bot, itemName, targetPosition, options = {}) {
+  const allowed = buildingTargetAllowed(bot, targetPosition, options)
+  if (!allowed.ok) return allowed
+  if (typeof bot.placeBlock !== 'function' || typeof bot.equip !== 'function') {
+    return { ok: false, reason: 'building-support-unavailable' }
+  }
+
+  const existing = blockAtPosition(bot, targetPosition)
+  if (!isAirBlock(existing)) return { ok: false, reason: 'target-occupied' }
+
+  const item = findInventoryItem(bot, itemName)
+  if (!item) return { ok: false, reason: 'missing-ingredients', missingIngredients: [itemName] }
+
+  const placement = findPlacementReference(bot, targetPosition)
+  if (!placement) return { ok: false, reason: 'missing-reference-block' }
+
+  await bot.equip(item, 'hand')
+  await bot.placeBlock(placement.referenceBlock, placement.faceVector)
+  const placed = { item: item.name, position: targetPosition }
+  appendBuildingEvent(bot, 'building_project', `Placed ${item.name} near home.`, placed, options)
+  return placed
+}
+
+async function digBuildingBlock (bot, targetPosition, options = {}) {
+  const allowed = buildingTargetAllowed(bot, targetPosition, options)
+  if (!allowed.ok) return allowed
+  if (typeof bot.dig !== 'function') return { ok: false, reason: 'dig-support-unavailable' }
+
+  const target = blockAtPosition(bot, targetPosition)
+  if (isAirBlock(target)) return { ok: false, reason: 'missing-block' }
+  if (isProtectedBuildingBlock(target)) return { ok: false, reason: 'protected-block' }
+  if (typeof bot.canDigBlock === 'function' && !bot.canDigBlock(target)) return { ok: false, reason: 'undiggable-block' }
+
+  await bot.dig(target)
+  const dug = { block: target.name, position: targetPosition }
+  appendBuildingEvent(bot, 'building_project', `Dug ${target.name} near home.`, dug, options)
+  return dug
+}
+
+function plannedHomePositions (bot, offsets, options = {}) {
+  const homePosition = buildingHomePosition(bot, options)
+  if (!homePosition) return null
+  return offsets.map(offset => offsetPosition(homePosition, offset))
 }
 
 function containerBlockSnapshot (block) {
@@ -628,46 +965,114 @@ function toolDefinitions () {
     },
     {
       name: 'list_craftable_items',
-      description: 'List conservative safe crafting recipes and current missing ingredients.',
+      description: 'List currently craftable items from Mineflayer recipe data.',
       validate: passArgs,
-      execute: async bot => ({
-        items: Object.keys(SAFE_CRAFT_RECIPES).map(name => {
-          const missingIngredients = recipeMissingIngredients(bot, name)
-          return {
+      execute: async (bot, args) => {
+        const limit = Math.max(1, Math.min(Number.parseInt(args.limit || 24, 10) || 24, 64))
+        const itemsByName = bot.registry?.itemsByName || {}
+        const items = []
+
+        if (typeof bot.recipesFor !== 'function') return { items }
+
+        for (const [name, item] of Object.entries(itemsByName)) {
+          const recipes = bot.recipesFor(item.id, null, 1, null)
+          if (!Array.isArray(recipes) || recipes.length === 0) continue
+          items.push({
             name,
-            craftable: missingIngredients.length === 0,
-            missingIngredients
-          }
-        })
-      })
+            craftable: true,
+            recipes: recipes.length
+          })
+          if (items.length >= limit) break
+        }
+
+        return { items }
+      }
+    },
+    {
+      name: 'inspect_recipe',
+      description: 'Inspect Mineflayer recipe availability for an item with and without a crafting table.',
+      validate: validateRecipeItemArgs,
+      execute: async (bot, args) => inspectRecipeState(bot, args)
+    },
+    {
+      name: 'read_recipe_knowledge',
+      description: 'Read compact learned recipe knowledge from bot memory.',
+      validate: passArgs,
+      execute: async (bot, args, options) => {
+        const memoryPaths = resolveBotMemoryPaths(bot, options)
+        const learnedRecipesPath = options.learnedRecipesPath || memoryPaths.learnedRecipesPath
+        return {
+          recipes: summarizeRecipeKnowledge({
+            ...options,
+            learnedRecipesPath,
+            limit: args.limit
+          })
+        }
+      }
+    },
+    {
+      name: 'plan_crafting_goal',
+      description: 'Plan a learned crafting goal from Mineflayer recipe availability.',
+      validate: validateRecipeItemArgs,
+      execute: async (bot, args, options) => {
+        const memoryPaths = resolveBotMemoryPaths(bot, options)
+        const learnedRecipesPath = options.learnedRecipesPath || memoryPaths.learnedRecipesPath
+        const recipeOptions = { ...options, learnedRecipesPath }
+        const minecraftVersion = compactText(bot.version || bot.registry?.version?.minecraftVersion || '', '', 40)
+        const state = inspectRecipeState(bot, args)
+
+        if (state.ok === false) return state
+
+        if (!state.known) {
+          const record = upsertLearnedRecipe({
+            item: args.item,
+            status: 'failed',
+            minecraftVersion,
+            plan: [],
+            missingIngredients: ['missing-recipe']
+          }, recipeOptions)
+          return { ok: false, reason: 'missing-recipe', record, recipe: state }
+        }
+
+        const missingIngredients = state.requiresCraftingTable ? ['crafting_table_or_ingredients'] : []
+        const record = upsertLearnedRecipe({
+          item: args.item,
+          status: state.requiresCraftingTable ? 'blocked' : 'draft',
+          minecraftVersion,
+          plan: [{ tool: 'craft_item', item: args.item, count: args.count, requires: [] }],
+          missingIngredients
+        }, recipeOptions)
+
+        return { record, recipe: state }
+      }
+    },
+    {
+      name: 'craft_from_plan',
+      description: 'Craft an item from a learned recipe plan.',
+      validate: validateRecipeItemArgs,
+      execute: async (bot, args, options) => {
+        const memoryPaths = resolveBotMemoryPaths(bot, options)
+        const learnedRecipesPath = options.learnedRecipesPath || memoryPaths.learnedRecipesPath
+        const knowledge = readRecipeKnowledge({ ...options, learnedRecipesPath })
+        const record = knowledge.recipes[args.item]
+        if (!record) return { ok: false, reason: 'missing-plan' }
+
+        const step = Array.isArray(record.plan)
+          ? record.plan.find(step => step?.tool === 'craft_item')
+          : null
+        if (!step) return { ok: false, reason: 'empty-plan' }
+
+        return executeCraftItem(bot, {
+          item: step.item || args.item,
+          count: step.count || args.count
+        }, { ...options, learnedRecipesPath })
+      }
     },
     {
       name: 'craft_item',
-      description: 'Craft a known safe recipe if ingredients and Mineflayer crafting support are available.',
+      description: 'Craft an item using Mineflayer recipe data and record learned recipe outcomes.',
       validate: validateCraftItemArgs,
-      execute: async (bot, args, options) => {
-        if (typeof bot.recipesFor !== 'function' || typeof bot.craft !== 'function') {
-          return {
-            ok: false,
-            reason: 'crafting-support-unavailable',
-            missingTool: recordUnavailableTool(bot, 'craft_item', 'Bot cannot inspect recipes or craft items.', options)
-          }
-        }
-
-        const missingIngredients = recipeMissingIngredients(bot, args.item, args.count)
-        if (missingIngredients.length > 0) {
-          return { ok: false, reason: 'missing-ingredients', missingIngredients }
-        }
-
-        const itemType = itemIdByName(bot, args.item)
-        if (itemType === null) return { ok: false, reason: 'unknown-item' }
-        const recipes = bot.recipesFor(itemType, null, args.count)
-        const recipe = Array.isArray(recipes) ? recipes[0] : null
-        if (!recipe) return { ok: false, reason: 'missing-recipe' }
-
-        await bot.craft(recipe, args.count)
-        return { item: args.item, count: args.count }
-      }
+      execute: executeCraftItem
     },
     {
       name: 'eat_food',
@@ -724,6 +1129,67 @@ function toolDefinitions () {
       description: 'Start smelting a safe ore or simple input in a nearby furnace with available fuel.',
       validate: validateFurnaceItemArgs,
       execute: async (bot, args, options) => putItemInFurnace(bot, args, options)
+    },
+    {
+      name: 'place_block',
+      description: 'Place one safe block near remembered home with an explicit home-improvement policy.',
+      validate: validatePlaceBlockArgs,
+      execute: async (bot, args, options) => placeBuildingBlock(bot, args.item, args.position, options)
+    },
+    {
+      name: 'dig_block',
+      description: 'Dig one conservative repair block near remembered home with an explicit policy.',
+      validate: validateDigBlockArgs,
+      execute: async (bot, args, options) => digBuildingBlock(bot, args.position, options)
+    },
+    {
+      name: 'build_small_shelter',
+      description: 'Place a tiny bounded ring of safe blocks around remembered home.',
+      validate: validateShelterArgs,
+      execute: async (bot, args, options) => {
+        const positions = plannedHomePositions(bot, SIMPLE_SHELTER_OFFSETS, options)
+        if (!positions) return { ok: false, reason: 'missing-home' }
+        const placed = []
+        for (const position of positions) {
+          const result = await placeBuildingBlock(bot, args.item, position, options)
+          if (result?.ok === false) continue
+          placed.push(result)
+        }
+        if (placed.length === 0) return { ok: false, reason: 'no-blocks-placed' }
+        return { placed }
+      }
+    },
+    {
+      name: 'light_area',
+      description: 'Place a bounded set of torches around remembered home.',
+      validate: validateLightAreaArgs,
+      execute: async (bot, args, options) => {
+        const positions = plannedHomePositions(bot, LIGHT_AREA_OFFSETS, options)
+        if (!positions) return { ok: false, reason: 'missing-home' }
+        const placed = []
+        for (const position of positions) {
+          const result = await placeBuildingBlock(bot, args.item, position, options)
+          if (result?.ok === false) continue
+          placed.push(result)
+        }
+        if (placed.length === 0) return { ok: false, reason: 'no-lights-placed' }
+        return { placed }
+      }
+    },
+    {
+      name: 'repair_shelter',
+      description: 'Fill a small explicit list of shelter holes near remembered home.',
+      validate: validateRepairShelterArgs,
+      execute: async (bot, args, options) => {
+        const repaired = []
+        for (const position of args.holes) {
+          const result = await placeBuildingBlock(bot, args.item, position, options)
+          if (result?.ok === false) continue
+          repaired.push(result)
+        }
+        if (repaired.length === 0) return { ok: false, reason: 'no-repairs-made' }
+        return { repaired }
+      }
     }
   ]
 }

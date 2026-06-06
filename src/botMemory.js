@@ -41,6 +41,7 @@ function resolveBotMemoryPaths (bot, options = {}) {
     containersPath: path.join(root, 'containers.json'),
     containerMemoryPath: path.join(root, 'containers.json'),
     pyroFarmMemoryPath: path.join(root, 'pyro-farming.json'),
+    learnedRecipesPath: path.join(root, 'learned-recipes.json'),
     projectsPath: path.join(root, 'projects.json'),
     playersPath: path.join(root, 'players.json'),
     craftingPath: path.join(root, 'crafting.json'),

@@ -139,6 +139,10 @@ function createAiNpcState (bot, options = {}) {
 
 function createAiNpcPrompt (state) {
   const hasLifeGoal = Boolean(state?.life?.currentGoal)
+  const hasLegacyAutomations = Array.isArray(state?.automations) && state.automations.length > 0
+  const legacyAutomationExample = hasLegacyAutomations
+    ? cleanShortText(state.automations[0]?.name, 80) || 'AutomationName'
+    : 'AutomationName'
   const identityGuidance = hasLifeGoal
     ? [
         'You are not a generic Minecraft helper bot. You are an AI NPC with your own life, lifestyle, memories, and goals.',
@@ -146,7 +150,18 @@ function createAiNpcPrompt (state) {
       ]
     : []
   const lifeRules = hasLifeGoal
-    ? ['- Start automations only when they support state.life.currentGoal.']
+    ? ['- Use legacy automations only when they support state.life.currentGoal and no registered tool can make progress.']
+    : []
+  const legacyAutomationFallback = hasLegacyAutomations
+    ? [
+        '',
+        'Legacy automation fallback:',
+        JSON.stringify({
+          action: 'start_automation',
+          automation: legacyAutomationExample,
+          reason: 'short reason'
+        })
+      ]
     : []
 
   return [
@@ -158,7 +173,6 @@ function createAiNpcPrompt (state) {
     'Allowed instructions:',
     '{"action":"noop","reason":"short reason"}',
     '{"action":"tool","tool":"observe_world","args":{},"reason":"short reason"}',
-    '{"action":"start_automation","automation":"Mining","reason":"short reason"}',
     '{"action":"follow_player","player":"Steve","reason":"short reason"}',
     '{"action":"run_server_command","command":"/spawn","reason":"short reason"}',
     '{"action":"chat","message":"short chat message","reason":"short reason"}',
@@ -167,12 +181,16 @@ function createAiNpcPrompt (state) {
     'Rules:',
     '- Choose noop if the state is unsafe, boring, unclear, or already busy.',
     `- Registered tools: ${listAiNpcTools().map(tool => tool.name).join(', ')}.`,
+    '- Prefer registered tools over legacy automations.',
+    '- Treat /automation actions as legacy manual/debug controls, not the default autonomy path.',
+    '- Use start_automation only as a last-resort legacy fallback when no registered tool can make progress.',
     '- Use only automation names from state.automations.',
     ...lifeRules,
     '- Do not greet every online player or spam chat.',
     '- Do not run admin, moderation, destructive, permission, economy-transfer, or item-giving commands.',
     '- Keep chat messages under 160 characters and human-sounding.',
     '- Pick one small useful action, not a plan with multiple steps.',
+    ...legacyAutomationFallback,
     '',
     'Current state:',
     JSON.stringify(state, null, 2)
@@ -393,7 +411,8 @@ async function executeAiNpcInstruction (bot, instruction, options = {}) {
       ok: started === true,
       action,
       startedAutomation: automationManager.list()[index]?.name || instruction.automation,
-      index
+      index,
+      legacy: true
     }
   }
 

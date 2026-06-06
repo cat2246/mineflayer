@@ -35,7 +35,7 @@ describe('holocraft bot config', function () {
     assert.deepStrictEqual(life.recentEvents, [])
   })
 
-  it('resolves sanitized per-bot memory paths from bot username', () => {
+  it('resolves per-bot memory paths from sanitized bot username', () => {
     const { resolveBotMemoryPaths } = require('../bot')
     const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'bot-memory-')), 'bots')
 
@@ -48,6 +48,7 @@ describe('holocraft bot config', function () {
     assert.strictEqual(paths.chatMemoryPath, path.join(root, 'pyro-farm-bot', 'memory.md'))
     assert.strictEqual(paths.containerMemoryPath, path.join(root, 'pyro-farm-bot', 'containers.json'))
     assert.strictEqual(paths.pyroFarmMemoryPath, path.join(root, 'pyro-farm-bot', 'pyro-farming.json'))
+    assert.strictEqual(paths.learnedRecipesPath, path.join(root, 'pyro-farm-bot', 'learned-recipes.json'))
     assert.strictEqual(paths.placesPath, path.join(root, 'pyro-farm-bot', 'places.json'))
     assert.strictEqual(paths.npcLifePath, path.join(root, 'pyro-farm-bot', 'npc-life.json'))
     assert.strictEqual(paths.missingToolsPath, path.join(root, 'pyro-farm-bot', 'missing-tools.json'))
@@ -67,6 +68,86 @@ describe('holocraft bot config', function () {
 
     assert.strictEqual(paths.botId, '1234-abcd-main')
     assert.strictEqual(paths.root, path.join(root, '1234-abcd-main'))
+  })
+
+  it('normalizes learned recipe knowledge safely', () => {
+    const { normalizeRecipeKnowledge } = require('../bot')
+
+    assert.deepStrictEqual(normalizeRecipeKnowledge({
+      version: 999,
+      recipes: {
+        torch: {
+          item: 'torch',
+          status: 'verified',
+          minecraftVersion: '1.21.5',
+          plan: [{ tool: 'craft_item', item: 'torch', count: 4, requires: ['stick', 'coal'] }],
+          missingIngredients: ['coal'],
+          lastVerifiedAt: 123
+        },
+        broken: 'bad'
+      }
+    }), {
+      version: 1,
+      recipes: {
+        torch: {
+          item: 'torch',
+          status: 'verified',
+          minecraftVersion: '1.21.5',
+          plan: [{ tool: 'craft_item', item: 'torch', count: 4, requires: ['stick', 'coal'] }],
+          missingIngredients: ['coal'],
+          lastVerifiedAt: 123
+        }
+      }
+    })
+  })
+
+  it('reads and writes learned recipe knowledge', () => {
+    const {
+      readRecipeKnowledge,
+      upsertLearnedRecipe
+    } = require('../bot')
+    const learnedRecipesPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'learned-recipes-')), 'learned-recipes.json')
+
+    const record = upsertLearnedRecipe({
+      item: 'torch',
+      status: 'blocked',
+      minecraftVersion: '1.21.5',
+      plan: [],
+      missingIngredients: ['coal']
+    }, { learnedRecipesPath, now: () => 456 })
+    const knowledge = readRecipeKnowledge({ learnedRecipesPath })
+
+    assert.strictEqual(record.item, 'torch')
+    assert.strictEqual(record.lastVerifiedAt, 456)
+    assert.deepStrictEqual(knowledge.recipes.torch.missingIngredients, ['coal'])
+  })
+
+  it('handles empty learned recipe upserts and preserves zero timestamps', () => {
+    const { upsertLearnedRecipe } = require('../bot')
+    const learnedRecipesPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'learned-recipes-')), 'learned-recipes.json')
+
+    assert.strictEqual(upsertLearnedRecipe(null, { learnedRecipesPath }), null)
+
+    const record = upsertLearnedRecipe({
+      item: 'torch',
+      status: 'verified',
+      minecraftVersion: '1.21.5',
+      plan: [],
+      missingIngredients: [],
+      lastVerifiedAt: 0
+    }, { learnedRecipesPath, now: () => 123 })
+
+    assert.strictEqual(record.lastVerifiedAt, 0)
+
+    const generatedAtZero = upsertLearnedRecipe({
+      item: 'stick',
+      status: 'verified',
+      minecraftVersion: '1.21.5',
+      plan: [],
+      missingIngredients: []
+    }, { learnedRecipesPath, now: () => 0 })
+
+    assert.strictEqual(generatedAtZero.lastVerifiedAt, 0)
   })
 
   it('appends and reads NPC memory events as jsonl', () => {
@@ -9235,6 +9316,26 @@ describe('holocraft bot config', function () {
     assert(prompt.includes('improve-home-routine'))
   })
 
+  it('guides the AI NPC planner to prefer grounded tools over legacy automations', () => {
+    const { createAiNpcPrompt } = require('../bot')
+    const state = {
+      bot: { username: 'TestBot123' },
+      automations: [{ name: 'Wood cutting' }, { name: 'Mining' }],
+      players: [],
+      life: null
+    }
+
+    const prompt = createAiNpcPrompt(state)
+    const allowedStart = prompt.indexOf('Allowed instructions:')
+    const rulesStart = prompt.indexOf('Rules:')
+    const allowedInstructions = prompt.slice(allowedStart, rulesStart)
+
+    assert(prompt.includes('Prefer registered tools over legacy automations.'))
+    assert(prompt.includes('Legacy automation fallback:'))
+    assert(!allowedInstructions.includes('"action":"start_automation"'))
+    assert(prompt.includes('"action":"start_automation","automation":"Wood cutting","reason":"short reason"}'))
+  })
+
   it('does not reference NPC life goals without NPC life', () => {
     const { createAiNpcPrompt } = require('../bot')
     const state = {
@@ -9357,7 +9458,7 @@ describe('holocraft bot config', function () {
     assert(life.recentEvents.some(event => event.type === 'unsafe'))
   })
 
-  it('asks Codex for an idle NPC plan and starts the selected automation', async () => {
+  it('keeps legacy start_automation planner instructions compatible', async () => {
     const { runAiNpcCycle } = require('../bot')
     const bot = new EventEmitter()
     const started = []
@@ -9406,6 +9507,7 @@ describe('holocraft bot config', function () {
     assert.strictEqual(plannerState.inventory.items[0].name, 'oak_log')
     assert.strictEqual(result.instruction.action, 'start_automation')
     assert.strictEqual(result.execution.startedAutomation, 'Mining')
+    assert.strictEqual(result.execution.legacy, true)
   })
 
   it('records AI NPC missing tools into per-bot memory', async () => {
@@ -9542,6 +9644,45 @@ describe('holocraft bot config', function () {
     assert.strictEqual(result.execution.toolResult.command, '/spawn')
   })
 
+  it('executes grounded AI NPC tools without starting legacy automations', async () => {
+    const { runAiNpcCycle } = require('../bot')
+    const bot = new EventEmitter()
+    bot.username = 'ToolBot'
+    bot.health = 20
+    bot.food = 20
+    bot.players = {}
+    bot.inventory = {
+      emptySlotCount: () => 35,
+      items: () => [{ name: 'oak_log', count: 4 }]
+    }
+
+    const result = await runAiNpcCycle(bot, {
+      automationManager: {
+        getStatus: () => ({ active: null }),
+        isIdle: () => true,
+        list: () => [{ name: 'Mining' }],
+        startByIndex: async () => {
+          throw new Error('legacy automation should not start for a tool instruction')
+        }
+      },
+      followController: {
+        getStatus: () => ({ followedPlayerName: null }),
+        isIdle: () => true
+      },
+      runPlanner: async () => ({
+        action: 'tool',
+        tool: 'inspect_inventory',
+        args: {},
+        reason: 'check supplies'
+      })
+    })
+
+    assert.strictEqual(result.instruction.action, 'tool')
+    assert.strictEqual(result.execution.ok, true)
+    assert.strictEqual(result.execution.tool, 'inspect_inventory')
+    assert.strictEqual(result.execution.result.items[0].name, 'oak_log')
+  })
+
   it('lists initial AI NPC tools from the registry', () => {
     const { listAiNpcTools } = require('../bot')
 
@@ -9562,11 +9703,20 @@ describe('holocraft bot config', function () {
       'find_container',
       'remember_container',
       'list_craftable_items',
+      'inspect_recipe',
+      'read_recipe_knowledge',
+      'plan_crafting_goal',
+      'craft_from_plan',
       'craft_item',
       'eat_food',
       'sleep_if_possible',
       'cook_food',
-      'smelt_item'
+      'smelt_item',
+      'place_block',
+      'dig_block',
+      'build_small_shelter',
+      'light_area',
+      'repair_shelter'
     ])
   })
 
@@ -9760,9 +9910,9 @@ describe('holocraft bot config', function () {
       tool: 'craft_item',
       args: { item: 'diamond_sword' }
     }), {
-      ok: false,
+      ok: true,
       tool: 'craft_item',
-      reason: 'unsafe-recipe'
+      args: { item: 'diamond_sword', count: 1 }
     })
 
     assert.deepStrictEqual(validateAiNpcToolCall({
@@ -9784,29 +9934,270 @@ describe('holocraft bot config', function () {
     })
   })
 
-  it('lists safe craftable items and explains missing ingredients', async () => {
+  it('lists safe craftable Mineflayer items from current recipes', async () => {
     const { executeAiNpcTool } = require('../bot')
     const bot = survivalToolBot()
-    bot.inventory.items = () => [{ name: 'oak_log', type: 17, metadata: 0, count: 1 }]
     bot.recipesFor = (type) => type === 58 ? [{ id: 'crafting_table_recipe' }] : []
 
     const listed = await executeAiNpcTool(bot, {
       tool: 'list_craftable_items',
       args: {}
     })
-    const missing = await executeAiNpcTool(bot, {
-      tool: 'craft_item',
-      args: { item: 'torch', count: 1 }
-    })
 
     assert.strictEqual(listed.ok, true)
-    assert(listed.result.items.some(item => item.name === 'crafting_table' && item.craftable))
-    assert.strictEqual(missing.ok, false)
-    assert.strictEqual(missing.reason, 'missing-ingredients')
-    assert.deepStrictEqual(missing.result.missingIngredients, ['coal', 'stick'])
+    assert.deepStrictEqual(listed.result.items, [
+      { name: 'crafting_table', craftable: true, recipes: 1 }
+    ])
   })
 
-  it('crafts known safe recipes through the NPC tool registry', async () => {
+  it('crafts any Mineflayer-known recipe without hardcoded recipe allowlists', async () => {
+    const { executeAiNpcTool, readRecipeKnowledge } = require('../bot')
+    const events = []
+    const learnedRecipesPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'learned-recipes-')), 'learned-recipes.json')
+    const bot = survivalToolBot(events)
+    bot.registry.itemsByName.ladder = { id: 65 }
+    bot.registry.itemsByName.stick = { id: 280 }
+    bot.recipesFor = (type, metadata, count, craftingTable) => {
+      assert.strictEqual(type, 65)
+      assert.strictEqual(count, 3)
+      assert.strictEqual(craftingTable, null)
+      return [{ id: 'ladder_recipe', result: { id: 65, count: 3 }, delta: [{ id: 280, count: -7 }] }]
+    }
+    bot.craft = async (recipe, count) => events.push(['craft', recipe.id, count])
+
+    const result = await executeAiNpcTool(bot, {
+      tool: 'craft_item',
+      args: { item: 'ladder', count: 3 }
+    }, { learnedRecipesPath, now: () => 2000 })
+    const knowledge = readRecipeKnowledge({ learnedRecipesPath })
+
+    assert.strictEqual(result.ok, true)
+    assert.deepStrictEqual(events, [['craft', 'ladder_recipe', 1]])
+    assert.deepStrictEqual(knowledge.recipes.ladder.plan[0].requires, ['stick'])
+  })
+
+  it('plans and crafts from learned recipe plans', async () => {
+    const { executeAiNpcTool, readRecipeKnowledge } = require('../bot')
+    const events = []
+    const learnedRecipesPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'learned-recipes-')), 'learned-recipes.json')
+    const bot = survivalToolBot(events)
+    bot.registry.itemsByName.ladder = { id: 65 }
+    bot.recipesAll = () => [{ id: 'ladder_recipe', result: { id: 65, count: 3 }, delta: [] }]
+    bot.recipesFor = () => [{ id: 'ladder_recipe', result: { id: 65, count: 3 }, delta: [] }]
+    bot.craft = async (recipe, count) => events.push(['craft', recipe.id, count])
+
+    const planned = await executeAiNpcTool(bot, {
+      tool: 'plan_crafting_goal',
+      args: { item: 'ladder', count: 3 }
+    }, { learnedRecipesPath, now: () => 4000 })
+    const crafted = await executeAiNpcTool(bot, {
+      tool: 'craft_from_plan',
+      args: { item: 'ladder' }
+    }, { learnedRecipesPath })
+    const knowledge = readRecipeKnowledge({ learnedRecipesPath })
+
+    assert.strictEqual(planned.ok, true)
+    assert.strictEqual(crafted.ok, true)
+    assert.strictEqual(knowledge.recipes.ladder.status, 'verified')
+    assert.deepStrictEqual(events, [['craft', 'ladder_recipe', 1]])
+  })
+
+  it('returns recipe support unavailable without caching a learned recipe plan', async () => {
+    const { executeAiNpcTool, readRecipeKnowledge } = require('../bot')
+    const learnedRecipesPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'learned-recipes-')), 'learned-recipes.json')
+    const bot = survivalToolBot()
+    bot.registry.itemsByName.ladder = { id: 65 }
+    delete bot.recipesAll
+
+    const result = await executeAiNpcTool(bot, {
+      tool: 'plan_crafting_goal',
+      args: { item: 'ladder', count: 3 }
+    }, { learnedRecipesPath })
+    const knowledge = readRecipeKnowledge({ learnedRecipesPath })
+
+    assert.strictEqual(result.ok, false)
+    assert.strictEqual(result.reason, 'recipe-support-unavailable')
+    assert.strictEqual(knowledge.recipes.ladder, undefined)
+  })
+
+  it('keeps known learned recipe plans draft until crafted', async () => {
+    const { executeAiNpcTool, readRecipeKnowledge } = require('../bot')
+    const learnedRecipesPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'learned-recipes-')), 'learned-recipes.json')
+    const bot = survivalToolBot()
+    bot.registry.itemsByName.ladder = { id: 65 }
+    bot.recipesAll = () => [{ id: 'ladder_recipe', result: { id: 65, count: 3 }, delta: [] }]
+
+    const result = await executeAiNpcTool(bot, {
+      tool: 'plan_crafting_goal',
+      args: { item: 'ladder', count: 3 }
+    }, { learnedRecipesPath, now: () => 4100 })
+    const knowledge = readRecipeKnowledge({ learnedRecipesPath })
+
+    assert.strictEqual(result.ok, true)
+    assert.strictEqual(knowledge.recipes.ladder.status, 'draft')
+  })
+
+  it('returns missing learned recipe plan when no plan is cached', async () => {
+    const { executeAiNpcTool } = require('../bot')
+    const learnedRecipesPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'learned-recipes-')), 'learned-recipes.json')
+    const bot = survivalToolBot()
+
+    const result = await executeAiNpcTool(bot, {
+      tool: 'craft_from_plan',
+      args: { item: 'ladder' }
+    }, { learnedRecipesPath })
+
+    assert.strictEqual(result.ok, false)
+    assert.strictEqual(result.reason, 'missing-plan')
+  })
+
+  it('returns empty learned recipe plan when cached plan has no craft step', async () => {
+    const { executeAiNpcTool, upsertLearnedRecipe } = require('../bot')
+    const learnedRecipesPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'learned-recipes-')), 'learned-recipes.json')
+    const bot = survivalToolBot()
+
+    upsertLearnedRecipe({
+      item: 'ladder',
+      status: 'draft',
+      minecraftVersion: '1.21.5',
+      plan: [],
+      missingIngredients: []
+    }, { learnedRecipesPath })
+
+    const result = await executeAiNpcTool(bot, {
+      tool: 'craft_from_plan',
+      args: { item: 'ladder' }
+    }, { learnedRecipesPath })
+
+    assert.strictEqual(result.ok, false)
+    assert.strictEqual(result.reason, 'empty-plan')
+  })
+
+  it('fails stale learned recipe plans through craft item execution', async () => {
+    const { executeAiNpcTool, readRecipeKnowledge, upsertLearnedRecipe } = require('../bot')
+    const learnedRecipesPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'learned-recipes-')), 'learned-recipes.json')
+    const bot = survivalToolBot()
+    bot.registry.itemsByName.ladder = { id: 65 }
+    bot.recipesAll = () => []
+    bot.recipesFor = () => []
+    upsertLearnedRecipe({
+      item: 'ladder',
+      status: 'draft',
+      minecraftVersion: '1.21.5',
+      plan: [{ tool: 'craft_item', item: 'ladder', count: 3, requires: [] }],
+      missingIngredients: []
+    }, { learnedRecipesPath })
+
+    const result = await executeAiNpcTool(bot, {
+      tool: 'craft_from_plan',
+      args: { item: 'ladder' }
+    }, { learnedRecipesPath })
+    const knowledge = readRecipeKnowledge({ learnedRecipesPath })
+
+    assert.strictEqual(result.ok, false)
+    assert.strictEqual(result.reason, 'missing-ingredients-or-table')
+    assert.strictEqual(knowledge.recipes.ladder.status, 'blocked')
+  })
+
+  it('crafts table-required recipes when a crafting table is nearby', async () => {
+    const { executeAiNpcTool, readRecipeKnowledge } = require('../bot')
+    const events = []
+    const learnedRecipesPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'learned-recipes-')), 'learned-recipes.json')
+    const craftingTable = block('crafting_table', 1, 64, 0)
+    const bot = survivalToolBot(events, [craftingTable])
+    bot.registry.itemsByName.ladder = { id: 65 }
+    bot.registry.itemsByName.stick = { id: 280 }
+    bot.recipesFor = (type, metadata, count, tableBlock) => {
+      assert.strictEqual(type, 65)
+      assert.strictEqual(count, 3)
+      return tableBlock
+        ? [{ id: 'ladder_recipe', result: { id: 65, count: 3 }, delta: [{ id: 280, count: -7 }] }]
+        : []
+    }
+    bot.craft = async (recipe, count, tableBlock) => events.push(['craft', recipe.id, count, tableBlock.name])
+
+    const result = await executeAiNpcTool(bot, {
+      tool: 'craft_item',
+      args: { item: 'ladder', count: 3 }
+    }, { learnedRecipesPath, now: () => 2500 })
+    const knowledge = readRecipeKnowledge({ learnedRecipesPath })
+
+    assert.strictEqual(result.ok, true)
+    assert.deepStrictEqual(events, [['craft', 'ladder_recipe', 1, 'crafting_table']])
+    assert.deepStrictEqual(knowledge.recipes.ladder.plan[0].requires, ['stick'])
+  })
+
+  it('records blocked learned recipes when Mineflayer has no craftable recipe', async () => {
+    const { executeAiNpcTool, readRecipeKnowledge } = require('../bot')
+    const learnedRecipesPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'learned-recipes-')), 'learned-recipes.json')
+    const bot = survivalToolBot()
+    bot.registry.itemsByName.ladder = { id: 65 }
+    bot.recipesFor = () => []
+    bot.recipesAll = () => [{ id: 'ladder_recipe', requiresTable: true }]
+
+    const result = await executeAiNpcTool(bot, {
+      tool: 'craft_item',
+      args: { item: 'ladder', count: 3 }
+    }, { learnedRecipesPath, now: () => 3000 })
+    const knowledge = readRecipeKnowledge({ learnedRecipesPath })
+
+    assert.strictEqual(result.ok, false)
+    assert.strictEqual(result.reason, 'missing-ingredients-or-table')
+    assert.strictEqual(knowledge.recipes.ladder.status, 'blocked')
+  })
+
+  it('inspects Mineflayer recipes through the AI NPC tool registry', async () => {
+    const { executeAiNpcTool } = require('../bot')
+    const bot = survivalToolBot()
+    bot.registry.itemsByName.ladder = { id: 65 }
+    bot.recipesAll = (type, metadata, craftingTable) => {
+      assert.strictEqual(type, 65)
+      return craftingTable
+        ? [{ result: { id: 65, count: 3 }, requiresTable: true }]
+        : []
+    }
+
+    const result = await executeAiNpcTool(bot, {
+      tool: 'inspect_recipe',
+      args: { item: 'ladder', count: 3 }
+    })
+
+    assert.strictEqual(result.ok, true)
+    assert.deepStrictEqual(result.result, {
+      item: 'ladder',
+      count: 3,
+      known: true,
+      inventoryRecipes: 0,
+      tableRecipes: 1,
+      requiresCraftingTable: true
+    })
+  })
+
+  it('reads compact learned recipe knowledge through the AI NPC tool registry', async () => {
+    const { executeAiNpcTool, upsertLearnedRecipe } = require('../bot')
+    const learnedRecipesPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'learned-recipes-')), 'learned-recipes.json')
+    const bot = survivalToolBot()
+
+    upsertLearnedRecipe({
+      item: 'torch',
+      status: 'blocked',
+      minecraftVersion: '1.21.5',
+      plan: [],
+      missingIngredients: ['coal']
+    }, { learnedRecipesPath, now: () => 1000 })
+
+    const result = await executeAiNpcTool(bot, {
+      tool: 'read_recipe_knowledge',
+      args: { limit: 3 }
+    }, { learnedRecipesPath })
+
+    assert.strictEqual(result.ok, true)
+    assert.deepStrictEqual(result.result.recipes, [
+      { item: 'torch', status: 'blocked', missingIngredients: ['coal'], steps: 0 }
+    ])
+  })
+
+  it('crafts known safe Mineflayer recipes through the NPC tool registry', async () => {
     const { executeAiNpcTool } = require('../bot')
     const events = []
     const bot = survivalToolBot(events)
@@ -9897,6 +10288,175 @@ describe('holocraft bot config', function () {
       ['putInput', 363, 0, 2],
       ['putInput', 15, 0, 3]
     ])
+  })
+
+  it('validates AI NPC simple building tools before execution', () => {
+    const { validateAiNpcToolCall } = require('../bot')
+
+    assert.deepStrictEqual(validateAiNpcToolCall({
+      tool: 'place_block',
+      args: {
+        item: 'cobblestone',
+        position: { x: 1, y: 65, z: 0 },
+        safetyPolicy: 'home_improvement'
+      }
+    }), {
+      ok: true,
+      tool: 'place_block',
+      args: {
+        item: 'cobblestone',
+        position: { x: 1, y: 65, z: 0 },
+        safetyPolicy: 'home_improvement'
+      }
+    })
+
+    assert.deepStrictEqual(validateAiNpcToolCall({
+      tool: 'place_block',
+      args: { item: 'cobblestone', position: { x: 1, y: 65, z: 0 } }
+    }), {
+      ok: false,
+      tool: 'place_block',
+      reason: 'safety-policy-required'
+    })
+
+    assert.deepStrictEqual(validateAiNpcToolCall({
+      tool: 'dig_block',
+      args: {
+        position: { x: 1, y: 64, z: 0 },
+        safetyPolicy: 'home_improvement'
+      }
+    }), {
+      ok: true,
+      tool: 'dig_block',
+      args: {
+        position: { x: 1, y: 64, z: 0 },
+        safetyPolicy: 'home_improvement'
+      }
+    })
+  })
+
+  it('places selected blocks near remembered home and records the building event', async () => {
+    const { executeAiNpcTool, rememberPlaceCoordinates } = require('../bot')
+    const events = []
+    const placesPath = tempPlacesPath()
+    const eventLogPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'building-events-')), 'event-log.jsonl')
+    const bot = buildingToolBot(events, [
+      block('grass_block', 1, 64, 0)
+    ])
+    bot.inventory.items = () => [{ name: 'cobblestone', type: 4, metadata: 0, count: 8 }]
+    rememberPlaceCoordinates(bot, 'home', combatPosition(0, 64, 0), { placesPath })
+
+    const result = await executeAiNpcTool(bot, {
+      tool: 'place_block',
+      args: {
+        item: 'cobblestone',
+        position: { x: 1, y: 65, z: 0 },
+        safetyPolicy: 'home_improvement'
+      }
+    }, { placesPath, eventLogPath })
+
+    assert.strictEqual(result.ok, true)
+    assert.deepStrictEqual(events, [
+      ['equip', 'cobblestone', 'hand'],
+      ['placeBlock', 'grass_block', 0, 1, 0]
+    ])
+    assert(fs.readFileSync(eventLogPath, 'utf8').includes('"type":"building_project"'))
+  })
+
+  it('refuses building edits outside the remembered home radius', async () => {
+    const { executeAiNpcTool, rememberPlaceCoordinates } = require('../bot')
+    const events = []
+    const placesPath = tempPlacesPath()
+    const bot = buildingToolBot(events, [
+      block('grass_block', 80, 64, 0)
+    ])
+    bot.inventory.items = () => [{ name: 'cobblestone', type: 4, metadata: 0, count: 8 }]
+    rememberPlaceCoordinates(bot, 'home', combatPosition(0, 64, 0), { placesPath })
+
+    const result = await executeAiNpcTool(bot, {
+      tool: 'place_block',
+      args: {
+        item: 'cobblestone',
+        position: { x: 80, y: 65, z: 0 },
+        safetyPolicy: 'home_improvement'
+      }
+    }, { placesPath, buildingHomeRadius: 12 })
+
+    assert.strictEqual(result.ok, false)
+    assert.strictEqual(result.reason, 'outside-home-build-radius')
+    assert.deepStrictEqual(events, [])
+  })
+
+  it('digs only conservative repair blocks near remembered home', async () => {
+    const { executeAiNpcTool, rememberPlaceCoordinates } = require('../bot')
+    const events = []
+    const placesPath = tempPlacesPath()
+    const bot = buildingToolBot(events, [
+      block('dirt', 1, 64, 0),
+      block('chest', 2, 64, 0)
+    ])
+    rememberPlaceCoordinates(bot, 'home', combatPosition(0, 64, 0), { placesPath })
+
+    const dug = await executeAiNpcTool(bot, {
+      tool: 'dig_block',
+      args: {
+        position: { x: 1, y: 64, z: 0 },
+        safetyPolicy: 'home_improvement'
+      }
+    }, { placesPath })
+    const protectedBlock = await executeAiNpcTool(bot, {
+      tool: 'dig_block',
+      args: {
+        position: { x: 2, y: 64, z: 0 },
+        safetyPolicy: 'home_improvement'
+      }
+    }, { placesPath })
+
+    assert.strictEqual(dug.ok, true)
+    assert.strictEqual(protectedBlock.ok, false)
+    assert.strictEqual(protectedBlock.reason, 'protected-block')
+    assert.deepStrictEqual(events, [['dig', 'dirt']])
+  })
+
+  it('builds bounded shelter, lights the area, and repairs a small hole near home', async () => {
+    const { executeAiNpcTool, rememberPlaceCoordinates } = require('../bot')
+    const events = []
+    const placesPath = tempPlacesPath()
+    const bot = buildingToolBot(events, [
+      block('grass_block', 1, 64, 0),
+      block('grass_block', -1, 64, 0),
+      block('grass_block', 0, 64, 1),
+      block('grass_block', 0, 64, -1),
+      block('grass_block', 2, 64, 0)
+    ])
+    bot.inventory.items = () => [
+      { name: 'cobblestone', type: 4, metadata: 0, count: 32 },
+      { name: 'torch', type: 50, metadata: 0, count: 8 }
+    ]
+    rememberPlaceCoordinates(bot, 'home', combatPosition(0, 64, 0), { placesPath })
+
+    const shelter = await executeAiNpcTool(bot, {
+      tool: 'build_small_shelter',
+      args: { item: 'cobblestone', safetyPolicy: 'home_improvement' }
+    }, { placesPath })
+    const lights = await executeAiNpcTool(bot, {
+      tool: 'light_area',
+      args: { safetyPolicy: 'home_improvement' }
+    }, { placesPath })
+    const repair = await executeAiNpcTool(bot, {
+      tool: 'repair_shelter',
+      args: {
+        item: 'cobblestone',
+        holes: [{ x: 2, y: 65, z: 0 }],
+        safetyPolicy: 'home_improvement'
+      }
+    }, { placesPath })
+
+    assert.strictEqual(shelter.ok, true)
+    assert.strictEqual(lights.ok, true)
+    assert.strictEqual(repair.ok, true)
+    assert(shelter.result.placed.length <= 8)
+    assert(events.some(event => event[0] === 'placeBlock' && event[1] === 'grass_block'))
   })
 
   it('executes registered AI NPC tools with normalized results', async () => {
@@ -10267,6 +10827,19 @@ function survivalToolBot (events = [], blocks = []) {
     candidate.position.y === position.y &&
     candidate.position.z === position.z
   ) || null
+  return bot
+}
+
+function buildingToolBot (events = [], blocks = []) {
+  const bot = survivalToolBot(events, blocks)
+  bot.game = { dimension: 'minecraft:overworld' }
+  bot.entity = { position: combatPosition(0, 64, 0) }
+  bot.inventory.items = () => []
+  bot.canDigBlock = block => !/bedrock|water|lava/i.test(block?.name || '')
+  bot.dig = async target => events.push(['dig', target.name])
+  bot.placeBlock = async (referenceBlock, faceVector) => {
+    events.push(['placeBlock', referenceBlock.name, faceVector.x, faceVector.y, faceVector.z])
+  }
   return bot
 }
 

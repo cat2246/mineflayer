@@ -148,11 +148,11 @@ function buildWindowsStartScript (cwd) {
   const safeCwd = escapePowerShell(cwd)
 
   return [
-    `$npmCommand = (Get-Command 'npm.cmd' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)`,
+    '$npmCommand = (Get-Command \'npm.cmd\' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)',
     'if ($npmCommand) {',
     `  $process = Start-Process -FilePath $npmCommand -ArgumentList @('run','start') -WorkingDirectory '${safeCwd}' -WindowStyle Hidden -PassThru`,
     '} else {',
-    `  $nodeCommand = (Get-Command 'node.exe' -ErrorAction Stop | Select-Object -First 1 -ExpandProperty Source)`,
+    '  $nodeCommand = (Get-Command \'node.exe\' -ErrorAction Stop | Select-Object -First 1 -ExpandProperty Source)',
     `  $process = Start-Process -FilePath $nodeCommand -ArgumentList @('bot.js') -WorkingDirectory '${safeCwd}' -WindowStyle Hidden -PassThru`,
     '}',
     '$process.Id'
