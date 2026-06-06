@@ -1,6 +1,12 @@
 const fs = require('fs')
 const path = require('path')
 const { resolveBotMemoryPaths } = require('./botMemory')
+const {
+  containerItems,
+  findNearbyContainerBlocks,
+  readContainerMemory,
+  visitContainerBlocks
+} = require('./containers')
 const { readMissingTools, recordMissingTool, recordSharedMissingTool } = require('./missingTools')
 const { readPlaceCoordinates, rememberPlaceCoordinates } = require('./places')
 
@@ -112,8 +118,84 @@ function validateMissingToolArgs (args) {
   }
 }
 
+function sanitizeItemNames (value) {
+  const items = Array.isArray(value) ? value : [value]
+  return [...new Set(items
+    .map(item => compactText(item, '', 80))
+    .filter(Boolean))]
+}
+
+function positiveIntegerOrNull (value) {
+  if (value === undefined || value === null || value === '') return null
+  const parsed = Number.parseInt(value, 10)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null
+}
+
+function validateDepositItemsArgs (args) {
+  const items = sanitizeItemNames(args.items || args.item)
+  if (items.length === 0) return { ok: false, reason: 'missing-items' }
+  return {
+    ok: true,
+    args: {
+      items,
+      maxCount: positiveIntegerOrNull(args.maxCount || args.count)
+    }
+  }
+}
+
+function validateWithdrawItemsArgs (args) {
+  const item = sanitizeItemNames(args.item || args.items)[0]
+  const count = positiveIntegerOrNull(args.count) || 1
+  if (!item) return { ok: false, reason: 'missing-item' }
+  return { ok: true, args: { item, count } }
+}
+
+function validateEquipItemArgs (args) {
+  const item = sanitizeItemNames(args.item || args.items)[0]
+  const destination = compactText(args.destination, 'hand', 32).toLowerCase()
+  if (!item) return { ok: false, reason: 'missing-item' }
+  if (!['hand', 'off-hand', 'head', 'torso', 'legs', 'feet'].includes(destination)) {
+    return { ok: false, reason: 'invalid-destination' }
+  }
+  return { ok: true, args: { item, destination } }
+}
+
+function validateContainerSearchArgs (args) {
+  const maxDistance = positiveIntegerOrNull(args.maxDistance || args.searchRadius)
+  return {
+    ok: true,
+    args: {
+      maxDistance: maxDistance || 8
+    }
+  }
+}
+
 function passArgs (args) {
   return { ok: true, args: objectArgs(args) }
+}
+
+function itemMatchesName (item, name) {
+  return String(item?.name || '').toLowerCase() === String(name || '').toLowerCase()
+}
+
+function itemMatchesAnyName (item, names) {
+  return names.some(name => itemMatchesName(item, name))
+}
+
+function containerBlockSnapshot (block) {
+  return {
+    name: block.name,
+    position: positionSnapshot(block.position)
+  }
+}
+
+function findContainerBlocksForTool (bot, args, options) {
+  return findNearbyContainerBlocks(bot, {
+    ...options,
+    chestSearchRadius: args.maxDistance,
+    searchRadius: args.maxDistance,
+    houseOnly: false
+  })
 }
 
 function toolDefinitions () {
@@ -240,6 +322,100 @@ function toolDefinitions () {
           ...options,
           missingToolsPath: options.missingToolsPath || memoryPaths.missingToolsPath
         }).slice(0, limit)
+      }
+    },
+    {
+      name: 'deposit_items',
+      description: 'Deposit explicitly selected inventory items into a nearby container.',
+      validate: validateDepositItemsArgs,
+      execute: async (bot, args, options) => {
+        const blocks = findContainerBlocksForTool(bot, { maxDistance: options.chestSearchRadius || 8 }, options)
+        if (blocks.length === 0) return { ok: false, reason: 'no-container' }
+        const deposited = []
+        let remaining = args.maxCount
+
+        const visited = await visitContainerBlocks(bot, blocks, {
+          ...options,
+          houseOnly: false,
+          originPosition: bot.entity?.position
+        }, async container => {
+          const candidates = (typeof bot.inventory?.items === 'function' ? bot.inventory.items() : [])
+            .filter(item => item && item.count > 0 && itemMatchesAnyName(item, args.items))
+
+          for (const item of candidates) {
+            if (remaining !== null && remaining <= 0) break
+            const count = remaining === null ? item.count : Math.min(item.count, remaining)
+            await container.deposit(item.type, item.metadata ?? null, count)
+            deposited.push({ name: item.name, count })
+            if (remaining !== null) remaining -= count
+          }
+
+          return deposited.length > 0
+        })
+
+        if (!visited) return { ok: false, reason: 'item-unavailable', deposited }
+        return { deposited }
+      }
+    },
+    {
+      name: 'withdraw_items',
+      description: 'Withdraw an explicitly selected item from a nearby container.',
+      validate: validateWithdrawItemsArgs,
+      execute: async (bot, args, options) => {
+        const blocks = findContainerBlocksForTool(bot, { maxDistance: options.chestSearchRadius || 8 }, options)
+        if (blocks.length === 0) return { ok: false, reason: 'no-container' }
+        const withdrawn = []
+
+        const visited = await visitContainerBlocks(bot, blocks, {
+          ...options,
+          houseOnly: false,
+          originPosition: bot.entity?.position
+        }, async container => {
+          const item = containerItems(container).find(candidate => itemMatchesName(candidate, args.item))
+          if (!item) return false
+
+          const count = Math.min(args.count, item.count)
+          await container.withdraw(item.type, item.metadata ?? null, count)
+          withdrawn.push({ name: item.name, count })
+          return true
+        })
+
+        if (!visited) return { ok: false, reason: 'item-unavailable', withdrawn }
+        return { withdrawn }
+      }
+    },
+    {
+      name: 'equip_item',
+      description: 'Equip a selected inventory item.',
+      validate: validateEquipItemArgs,
+      execute: async (bot, args) => {
+        if (typeof bot.equip !== 'function') return { ok: false, reason: 'equip-unavailable' }
+        const item = (typeof bot.inventory?.items === 'function' ? bot.inventory.items() : [])
+          .find(candidate => itemMatchesName(candidate, args.item))
+        if (!item) return { ok: false, reason: 'item-unavailable' }
+        await bot.equip(item, args.destination)
+        return { item: item.name, destination: args.destination }
+      }
+    },
+    {
+      name: 'find_container',
+      description: 'Find nearby containers and return compact locations.',
+      validate: validateContainerSearchArgs,
+      execute: async (bot, args, options) => {
+        const blocks = findContainerBlocksForTool(bot, args, options)
+        return { containers: blocks.map(containerBlockSnapshot) }
+      }
+    },
+    {
+      name: 'remember_container',
+      description: 'Remember nearby containers in structured container memory.',
+      validate: validateContainerSearchArgs,
+      execute: async (bot, args, options) => {
+        const blocks = findContainerBlocksForTool(bot, args, options)
+        return {
+          containers: blocks.map(containerBlockSnapshot),
+          memory: readContainerMemory(options)
+        }
       }
     }
   ]

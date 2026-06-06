@@ -9555,7 +9555,12 @@ describe('holocraft bot config', function () {
       'remember_place',
       'write_memory_event',
       'record_missing_tool',
-      'read_missing_tools'
+      'read_missing_tools',
+      'deposit_items',
+      'withdraw_items',
+      'equip_item',
+      'find_container',
+      'remember_container'
     ])
   })
 
@@ -9588,6 +9593,149 @@ describe('holocraft bot config', function () {
       tool: 'mine_block_or_vein',
       reason: 'unknown-tool'
     })
+  })
+
+  it('validates AI NPC inventory and storage tools before execution', () => {
+    const { validateAiNpcToolCall } = require('../bot')
+
+    assert.deepStrictEqual(validateAiNpcToolCall({
+      tool: 'deposit_items',
+      args: { items: ['oak_log'] }
+    }), {
+      ok: true,
+      tool: 'deposit_items',
+      args: { items: ['oak_log'], maxCount: null }
+    })
+
+    assert.deepStrictEqual(validateAiNpcToolCall({
+      tool: 'deposit_items',
+      args: {}
+    }), {
+      ok: false,
+      tool: 'deposit_items',
+      reason: 'missing-items'
+    })
+
+    assert.deepStrictEqual(validateAiNpcToolCall({
+      tool: 'withdraw_items',
+      args: { item: 'bread', count: 2 }
+    }), {
+      ok: true,
+      tool: 'withdraw_items',
+      args: { item: 'bread', count: 2 }
+    })
+
+    assert.deepStrictEqual(validateAiNpcToolCall({
+      tool: 'equip_item',
+      args: { item: 'iron_sword', destination: 'hand' }
+    }), {
+      ok: true,
+      tool: 'equip_item',
+      args: { item: 'iron_sword', destination: 'hand' }
+    })
+  })
+
+  it('deposits selected inventory items into a nearby container', async () => {
+    const { executeAiNpcTool } = require('../bot')
+    const events = []
+    const chest = block('chest', 1, 64, 0)
+    const bot = blockBot([chest], events)
+    bot.inventory.items = () => [
+      { name: 'oak_log', type: 17, metadata: 0, count: 8 },
+      { name: 'iron_sword', type: 267, metadata: 0, count: 1 }
+    ]
+    bot.openContainer = async target => {
+      events.push(['openContainer', target.name])
+      return {
+        containerItems: () => [],
+        deposit: async (type, metadata, count) => events.push(['deposit', type, metadata, count]),
+        close: () => events.push(['close'])
+      }
+    }
+
+    const result = await executeAiNpcTool(bot, {
+      tool: 'deposit_items',
+      args: { items: ['oak_log'] }
+    }, {
+      containerInteractionDelayMs: 0,
+      containerMemoryPath: tempContainerMemoryPath()
+    })
+
+    assert.strictEqual(result.ok, true)
+    assert.strictEqual(result.result.deposited.length, 1)
+    assert.deepStrictEqual(events.filter(event => event[0] === 'deposit'), [
+      ['deposit', 17, 0, 8]
+    ])
+  })
+
+  it('withdraws selected items from a nearby container', async () => {
+    const { executeAiNpcTool } = require('../bot')
+    const events = []
+    const chest = block('chest', 1, 64, 0)
+    const bot = blockBot([chest], events)
+    bot.openContainer = async target => {
+      events.push(['openContainer', target.name])
+      return {
+        containerItems: () => [{ name: 'bread', type: 297, metadata: 0, count: 5 }],
+        withdraw: async (type, metadata, count) => events.push(['withdraw', type, metadata, count]),
+        close: () => events.push(['close'])
+      }
+    }
+
+    const result = await executeAiNpcTool(bot, {
+      tool: 'withdraw_items',
+      args: { item: 'bread', count: 2 }
+    }, {
+      containerInteractionDelayMs: 0,
+      containerMemoryPath: tempContainerMemoryPath()
+    })
+
+    assert.strictEqual(result.ok, true)
+    assert.deepStrictEqual(events.filter(event => event[0] === 'withdraw'), [
+      ['withdraw', 297, 0, 2]
+    ])
+  })
+
+  it('equips selected inventory items through the NPC tool registry', async () => {
+    const { executeAiNpcTool } = require('../bot')
+    const events = []
+    const bot = new EventEmitter()
+    bot.inventory = {
+      items: () => [{ name: 'iron_sword', type: 267, metadata: 0, count: 1 }]
+    }
+    bot.equip = async (item, destination) => events.push(['equip', item.name, destination])
+
+    const result = await executeAiNpcTool(bot, {
+      tool: 'equip_item',
+      args: { item: 'iron_sword', destination: 'hand' }
+    })
+
+    assert.strictEqual(result.ok, true)
+    assert.deepStrictEqual(events, [['equip', 'iron_sword', 'hand']])
+  })
+
+  it('finds and remembers nearby containers through NPC tools', async () => {
+    const { executeAiNpcTool, readContainerMemory } = require('../bot')
+    const events = []
+    const containerMemoryPath = tempContainerMemoryPath()
+    const chest = block('chest', 1, 64, 0)
+    const barrel = block('barrel', 3, 64, 0)
+    const bot = blockBot([chest, barrel], events)
+
+    const found = await executeAiNpcTool(bot, {
+      tool: 'find_container',
+      args: { maxDistance: 8 }
+    }, { containerMemoryPath })
+    const remembered = await executeAiNpcTool(bot, {
+      tool: 'remember_container',
+      args: { maxDistance: 8 }
+    }, { containerMemoryPath })
+    const memory = readContainerMemory({ containerMemoryPath })
+
+    assert.strictEqual(found.ok, true)
+    assert.strictEqual(found.result.containers.length, 2)
+    assert.strictEqual(remembered.ok, true)
+    assert.strictEqual(Object.keys(memory.containers).length, 2)
   })
 
   it('executes registered AI NPC tools with normalized results', async () => {
