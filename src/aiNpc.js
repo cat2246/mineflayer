@@ -500,7 +500,7 @@ async function runAiNpcCycle (bot, options = {}) {
 
   const state = createAiNpcState(bot, options)
   const runPlanner = options.runPlanner || createAiNpcPlannerRunner({
-    ...buildCodexOptions(),
+    ...buildCodexOptions(process.env, { task: 'npc' }),
     ...(options.codex || {})
   })
   debugLog('aiNpc.request', {
@@ -533,7 +533,7 @@ function attachAiNpc (bot, options = {}) {
   const state = {
     ...options,
     runPlanner: options.runPlanner || createAiNpcPlannerRunner({
-      ...buildCodexOptions(),
+      ...buildCodexOptions(process.env, { task: 'npc' }),
       ...(options.codex || {})
     })
   }

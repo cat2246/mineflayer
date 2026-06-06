@@ -74,7 +74,10 @@ function buildMaintenancePrompt (options = {}) {
 }
 
 function buildCodexFixArgs (prompt, options = {}) {
-  const codexOptions = { ...buildCodexOptions(), ...(options.codex || {}) }
+  const codexOptions = {
+    ...buildCodexOptions(process.env, { task: 'maintenance' }),
+    ...(options.codex || {})
+  }
   const model = codexOptions.model
   const reasoningEffort = options.reasoningEffort || codexOptions.reasoningEffort || 'medium'
   const serviceTier = codexOptions.serviceTier

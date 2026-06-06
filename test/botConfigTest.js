@@ -3520,6 +3520,49 @@ describe('holocraft bot config', function () {
     })
   })
 
+  it('prefers task-specific Codex model overrides before the generic model', () => {
+    const { buildCodexOptions } = require('../bot')
+
+    assert.strictEqual(buildCodexOptions({
+      CODEX_AI_MODEL: 'gpt-5.4',
+      CODEX_CHAT_MODEL: 'gpt-5.4-mini',
+      CODEX_NPC_MODEL: 'gpt-5.4-nano'
+    }, { task: 'chat' }).model, 'gpt-5.4-mini')
+
+    assert.strictEqual(buildCodexOptions({
+      CODEX_AI_MODEL: 'gpt-5.4',
+      CODEX_CHAT_MODEL: 'gpt-5.4-mini',
+      CODEX_NPC_MODEL: 'gpt-5.4-nano'
+    }, { task: 'npc' }).model, 'gpt-5.4-nano')
+  })
+
+  it('falls back to the generic Codex model when a task-specific model is not configured', () => {
+    const { buildCodexOptions } = require('../bot')
+
+    assert.strictEqual(buildCodexOptions({
+      CODEX_AI_MODEL: 'gpt-shared'
+    }, { task: 'npc' }).model, 'gpt-shared')
+  })
+
+  it('uses the maintenance Codex model when building fixer args', () => {
+    const { buildCodexFixArgs } = require('../bot')
+    const previousMaintenanceModel = process.env.CODEX_MAINTENANCE_MODEL
+    const previousGenericModel = process.env.CODEX_AI_MODEL
+
+    process.env.CODEX_AI_MODEL = 'gpt-5.4-mini'
+    process.env.CODEX_MAINTENANCE_MODEL = 'gpt-5.5'
+
+    try {
+      const args = buildCodexFixArgs('fix things', { cwd: 'C:\\bots\\mineflayer' })
+      assert.strictEqual(args[2], 'gpt-5.5')
+    } finally {
+      if (previousGenericModel === undefined) delete process.env.CODEX_AI_MODEL
+      else process.env.CODEX_AI_MODEL = previousGenericModel
+      if (previousMaintenanceModel === undefined) delete process.env.CODEX_MAINTENANCE_MODEL
+      else process.env.CODEX_MAINTENANCE_MODEL = previousMaintenanceModel
+    }
+  })
+
   it('runs Codex chat from an isolated workspace by default', () => {
     const { buildCodexOptions } = require('../bot')
 

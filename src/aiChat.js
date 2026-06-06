@@ -26,6 +26,11 @@ const DEFAULT_QUIZ_ANSWER_TIMEOUT_MS = 120000
 const DEFAULT_NEARBY_PLAYER_CHAT_RANGE = 15
 const DEFAULT_CODEX_CONFIG_PATH = path.join(os.homedir(), '.codex', 'config.toml')
 const DEFAULT_CODEX_CHAT_WORKSPACE = path.join(os.tmpdir(), 'mineflayer-codex-chat')
+const CODEX_TASK_MODEL_ENV_KEYS = {
+  chat: 'CODEX_CHAT_MODEL',
+  npc: 'CODEX_NPC_MODEL',
+  maintenance: 'CODEX_MAINTENANCE_MODEL'
+}
 
 function stripAnsi (text) {
   const escape = String.fromCharCode(27)
@@ -337,10 +342,18 @@ function resolveCodexCommand (env = process.env, options = {}) {
     DEFAULT_CODEX_COMMAND
 }
 
+function resolveCodexModel (env = process.env, options = {}) {
+  const taskModelEnvKey = options.modelEnvKey || CODEX_TASK_MODEL_ENV_KEYS[options.task]
+  return options.model ||
+    (taskModelEnvKey ? env[taskModelEnvKey] : '') ||
+    env.CODEX_AI_MODEL ||
+    DEFAULT_CODEX_MODEL
+}
+
 function buildCodexOptions (env = process.env, options = {}) {
   return {
     command: resolveCodexCommand(env, options),
-    model: env.CODEX_AI_MODEL || DEFAULT_CODEX_MODEL,
+    model: resolveCodexModel(env, options),
     reasoningEffort: env.CODEX_AI_REASONING_EFFORT || DEFAULT_CODEX_REASONING_EFFORT,
     serviceTier: env.CODEX_AI_SERVICE_TIER || DEFAULT_CODEX_SERVICE_TIER,
     timeout: readPositiveInteger(env.CODEX_AI_TIMEOUT_MS, DEFAULT_CODEX_TIMEOUT_MS),
@@ -1393,7 +1406,7 @@ function attachAiChat (bot, options = {}) {
   const toolsPath = options.toolsPath === false
     ? null
     : (options.toolsPath || path.join(process.cwd(), DEFAULT_TOOLS_FILE))
-  const codexOptions = { ...buildCodexOptions(), ...(options.codex || {}) }
+  const codexOptions = { ...buildCodexOptions(process.env, { task: 'chat' }), ...(options.codex || {}) }
   const runCodex = options.runCodex || createCodexCliRunner(codexOptions)
   if (memoryPath && options.memoryEnabled !== false) ensureMemoryFile(memoryPath)
   if (toolsPath && options.toolsEnabled !== false) ensureToolsFile(toolsPath)
@@ -1529,6 +1542,7 @@ module.exports = {
   cleanCodexReply,
   createCodexCliRunner,
   createCodexPrompt,
+  resolveCodexModel,
   botMentionAliases,
   defaultMemoryText,
   defaultToolsText,
