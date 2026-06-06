@@ -69,6 +69,116 @@ describe('holocraft bot config', function () {
     assert.strictEqual(paths.root, path.join(root, '1234-abcd-main'))
   })
 
+  it('appends and reads NPC memory events as jsonl', () => {
+    const { appendNpcMemoryEvent, readNpcMemoryEvents } = require('../bot')
+    const eventLogPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'npc-events-')), 'event-log.jsonl')
+
+    appendNpcMemoryEvent({
+      type: 'home_set',
+      message: 'Set home in a forest.',
+      data: { place: 'home' }
+    }, { eventLogPath, now: () => 1000 })
+    appendNpcMemoryEvent({
+      type: 'tool_result',
+      message: 'Stored oak logs.'
+    }, { eventLogPath, now: () => 2000 })
+
+    assert.deepStrictEqual(readNpcMemoryEvents({ eventLogPath }), [
+      {
+        at: 1000,
+        source: 'npc-memory',
+        type: 'home_set',
+        message: 'Set home in a forest.',
+        data: { place: 'home' }
+      },
+      {
+        at: 2000,
+        source: 'npc-memory',
+        type: 'tool_result',
+        message: 'Stored oak logs.'
+      }
+    ])
+  })
+
+  it('writes NPC memory summary and journal during reflection', () => {
+    const {
+      appendNpcMemoryEvent,
+      readNpcMemorySummary,
+      recordMissingTool,
+      runNpcMemoryReflection
+    } = require('../bot')
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'npc-memory-'))
+    const eventLogPath = path.join(root, 'event-log.jsonl')
+    const memorySummaryPath = path.join(root, 'memory-summary.json')
+    const journalPath = path.join(root, 'daily-journal.md')
+    const missingToolsPath = path.join(root, 'missing-tools.json')
+
+    appendNpcMemoryEvent({
+      type: 'home_set',
+      message: 'Set home near oak trees.'
+    }, { eventLogPath, now: () => 1000 })
+    appendNpcMemoryEvent({
+      type: 'danger',
+      message: 'Night near home is unsafe.'
+    }, { eventLogPath, now: () => 1500 })
+    recordMissingTool({
+      capability: 'Mine ore safely',
+      desiredTool: 'mine_block_or_vein',
+      blockedGoal: 'Upgrade gear',
+      reason: 'Need iron.',
+      priority: 'high'
+    }, { missingToolsPath, now: () => 1600 })
+
+    const summary = runNpcMemoryReflection({
+      botName: 'LifeBot',
+      eventLogPath,
+      memorySummaryPath,
+      journalPath,
+      missingToolsPath,
+      now: () => 2000
+    })
+
+    assert.strictEqual(summary.updatedAt, 2000)
+    assert.strictEqual(summary.identity, 'LifeBot is a survival NPC building a stable routine.')
+    assert(summary.home.includes('Set home near oak trees.'))
+    assert.deepStrictEqual(summary.knownRisks, ['Night near home is unsafe.'])
+    assert(summary.importantMissingTools[0].includes('Mine ore safely'))
+    assert.deepStrictEqual(readNpcMemorySummary({ memorySummaryPath }), summary)
+    assert(fs.readFileSync(journalPath, 'utf8').includes('## 1970-01-01T00:00:02.000Z'))
+  })
+
+  it('schedules NPC memory reflection every 30 real minutes', async () => {
+    const { NPC_MEMORY_REFLECTION_INTERVAL_MS, attachNpcMemoryReflection } = require('../bot')
+    const bot = new EventEmitter()
+    const timers = []
+    const cleared = []
+    const calls = []
+
+    const controller = attachNpcMemoryReflection(bot, {
+      runReflection: options => {
+        calls.push(options.botName)
+        return { updatedAt: 1000 }
+      },
+      setInterval: (callback, delayMs) => {
+        const timer = { callback, delayMs, unref: () => { timer.unrefCalled = true } }
+        timers.push(timer)
+        return timer
+      },
+      clearInterval: timer => cleared.push(timer)
+    })
+
+    assert.strictEqual(timers.length, 1)
+    assert.strictEqual(timers[0].delayMs, NPC_MEMORY_REFLECTION_INTERVAL_MS)
+    assert.strictEqual(timers[0].unrefCalled, true)
+
+    bot.username = 'LifeBot'
+    await timers[0].callback()
+    assert.deepStrictEqual(calls, ['LifeBot'])
+
+    controller.stop()
+    assert.deepStrictEqual(cleared, timers)
+  })
+
   it('wires launched bots to their own memory paths', () => {
     const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'bot-memory-')), 'bots')
     const calls = {
@@ -101,6 +211,7 @@ describe('holocraft bot config', function () {
       '../src/logTerminal',
       '../src/nightSafety',
       '../src/npcLife',
+      '../src/npcMemory',
       '../src/startupHome',
       '../src/viewer'
     ]
@@ -190,6 +301,12 @@ describe('holocraft bot config', function () {
         return { name: 'npc-life' }
       }
     })
+    stubModule('../src/npcMemory', {
+      attachNpcMemoryReflection: (bot, options) => {
+        calls.npcMemoryReflection = options
+        return { stop: () => {} }
+      }
+    })
     stubModule('../src/startupHome', {
       attachStartupHomeFlow: (bot, options) => {
         calls.startupHome = options
@@ -233,6 +350,9 @@ describe('holocraft bot config', function () {
       placesPath: path.join(expectedRoot, 'places.json'),
       npcLifePath: path.join(expectedRoot, 'npc-life.json'),
       missingToolsPath: path.join(expectedRoot, 'missing-tools.json'),
+      memorySummaryPath: path.join(expectedRoot, 'memory-summary.json'),
+      eventLogPath: path.join(expectedRoot, 'event-log.jsonl'),
+      journalPath: path.join(expectedRoot, 'daily-journal.md'),
       debugLogPath: path.join(expectedRoot, 'debug.log')
     }
 
@@ -248,6 +368,9 @@ describe('holocraft bot config', function () {
     assert.strictEqual(calls.nightSafety.containerMemoryPath, expected.containerMemoryPath)
     assert.strictEqual(calls.nightSafety.placesPath, expected.placesPath)
     assert.strictEqual(calls.startupHome.placesPath, expected.placesPath)
+    assert.strictEqual(calls.npcMemoryReflection.memorySummaryPath, expected.memorySummaryPath)
+    assert.strictEqual(calls.npcMemoryReflection.eventLogPath, expected.eventLogPath)
+    assert.strictEqual(calls.npcMemoryReflection.journalPath, expected.journalPath)
     assert.strictEqual(calls.console.debugLogPath, expected.debugLogPath)
     assert.strictEqual(calls.logTerminal.logPath, expected.debugLogPath)
     assert.strictEqual(calls.automation.containerMemoryPath, expected.containerMemoryPath)
@@ -9043,6 +9166,46 @@ describe('holocraft bot config', function () {
 
     assert.strictEqual(state.life.currentLifestyle, 'homesteader')
     assert.strictEqual(state.life.currentGoal.id, 'survive-and-settle')
+  })
+
+  it('includes compact memory summary in AI NPC state snapshots', () => {
+    const { createAiNpcState, recordMissingTool, writeNpcMemorySummary } = require('../bot')
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'npc-memory-'))
+    const memorySummaryPath = path.join(root, 'memory-summary.json')
+    const missingToolsPath = path.join(root, 'missing-tools.json')
+    const bot = new EventEmitter()
+    bot.username = 'LifeBot'
+    bot.entity = { position: combatPosition(0, 64, 0) }
+    bot.inventory = { items: () => [] }
+    bot.players = {}
+
+    writeNpcMemorySummary({
+      identity: 'A cautious homesteader.',
+      home: 'Home is near oak trees.',
+      currentProjects: ['Improve shelter'],
+      knownRisks: ['Night is unsafe.'],
+      importantMissingTools: [],
+      recentImportantEvents: ['Set home.'],
+      updatedAt: 1000
+    }, { memorySummaryPath })
+    recordMissingTool({
+      capability: 'Cook food',
+      desiredTool: 'cook_item',
+      blockedGoal: 'Secure food',
+      reason: 'Need better food.',
+      priority: 'high'
+    }, { missingToolsPath, now: () => 1000 })
+
+    const state = createAiNpcState(bot, {
+      memorySummaryPath,
+      missingToolsPath,
+      now: () => 2000
+    })
+
+    assert.strictEqual(state.memory.summary.identity, 'A cautious homesteader.')
+    assert.strictEqual(state.memory.summary.home, 'Home is near oak trees.')
+    assert.strictEqual(state.memory.missingTools.length, 1)
+    assert(state.memory.missingTools[0].includes('Cook food'))
   })
 
   it('guides the AI NPC prompt with lifestyle and current goal', () => {

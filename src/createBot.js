@@ -19,6 +19,7 @@ const { attachKnockbackPause } = require('./knockbackPause')
 const { startLogTerminal } = require('./logTerminal')
 const { attachNightSafety } = require('./nightSafety')
 const { createNpcLifeController } = require('./npcLife')
+const { attachNpcMemoryReflection } = require('./npcMemory')
 const { attachStartupHomeFlow } = require('./startupHome')
 const { closeViewer } = require('./viewer')
 
@@ -113,6 +114,9 @@ function createBot (options = buildBotOptions(), runtimeOptions = {}) {
     placesPath: options.placesPath || runtimeOptions.placesPath || memoryPaths.placesPath,
     npcLifePath: options.npcLifePath || runtimeOptions.npcLifePath || memoryPaths.npcLifePath,
     missingToolsPath: options.missingToolsPath || runtimeOptions.missingToolsPath || memoryPaths.missingToolsPath,
+    memorySummaryPath: options.memorySummaryPath || runtimeOptions.memorySummaryPath || memoryPaths.memorySummaryPath,
+    eventLogPath: options.eventLogPath || runtimeOptions.eventLogPath || memoryPaths.eventLogPath,
+    journalPath: options.journalPath || runtimeOptions.journalPath || memoryPaths.journalPath,
     debugLogPath: options.debugLogPath || runtimeOptions.debugLogPath || memoryPaths.debugLogPath
   }
   const debugLog = createDebugLogger(undefined, memoryOptions.debugLogPath)
@@ -134,6 +138,9 @@ function createBot (options = buildBotOptions(), runtimeOptions = {}) {
   delete mineflayerOptions.placesPath
   delete mineflayerOptions.npcLifePath
   delete mineflayerOptions.missingToolsPath
+  delete mineflayerOptions.memorySummaryPath
+  delete mineflayerOptions.eventLogPath
+  delete mineflayerOptions.journalPath
   delete mineflayerOptions.debugLogPath
   debugLog('bot.start', {
     host: mineflayerOptions.host,
@@ -160,6 +167,7 @@ function createBot (options = buildBotOptions(), runtimeOptions = {}) {
   const knockbackController = attachKnockbackPause(bot, { debugLog })
   const nightSafetyController = attachNightSafety(bot, { ...memoryOptions, debugLog, automationManager })
   const startupHomeController = attachStartupHomeFlow(bot, { ...memoryOptions, debugLog })
+  const npcMemoryReflection = attachNpcMemoryReflection(bot, { ...memoryOptions, debugLog })
   startConsole(bot, { ...memoryOptions, debugLog, automationManager, followController, knockbackController, nightSafetyController })
   attachCombat(bot, { debugLog })
   attachAiChat(bot, { ...memoryOptions, debugLog, automationManager })
@@ -180,6 +188,7 @@ function createBot (options = buildBotOptions(), runtimeOptions = {}) {
   attachShutdownHandlers(bot, runtimeOptions.shutdownSignals)
   if (logTerminal) bot.__logTerminal = logTerminal
   bot.__startupHomeController = startupHomeController
+  bot.__npcMemoryReflection = npcMemoryReflection
   bot.__aiNpcController = aiNpcController
   bot.__aiNpcScheduler = aiNpcScheduler
   return bot

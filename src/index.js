@@ -27,6 +27,7 @@ module.exports = {
   ...require('./missingTools'),
   ...require('./nightSafety'),
   ...require('./npcLife'),
+  ...require('./npcMemory'),
   ...require('./places'),
   ...require('./profileStore'),
   ...require('./pyroFarming'),

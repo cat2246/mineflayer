@@ -9,6 +9,8 @@ const {
 const { recordMissingFunction } = require('./issueRecorder')
 const { resolveBotMemoryPaths } = require('./botMemory')
 const { executeAiNpcTool, listAiNpcTools } = require('./aiNpcTools')
+const { summarizeMissingTools } = require('./missingTools')
+const { readNpcMemorySummary } = require('./npcMemory')
 
 const DEFAULT_AI_NPC_MAX_BUFFER = 1024 * 1024
 const DEFAULT_AI_NPC_CHAT_MAX_LENGTH = 160
@@ -82,6 +84,16 @@ function createAiNpcState (bot, options = {}) {
   const automationManager = options.automationManager
   const followController = options.followController
   const currentTime = now()
+  const memorySummary = options.memorySummary === false
+    ? null
+    : readNpcMemorySummary(options)
+  const missingTools = options.missingToolsSummary === false
+    ? []
+    : summarizeMissingTools({
+      ...options,
+      currentGoal: options.npcLife?.read?.()?.currentGoal?.title,
+      limit: options.missingToolsSummaryLimit || 3
+    })
 
   return {
     timestamp: new Date(currentTime).toISOString(),
@@ -116,6 +128,10 @@ function createAiNpcState (bot, options = {}) {
     life: typeof options.npcLife?.read === 'function'
       ? options.npcLife.read()
       : options.life || null,
+    memory: {
+      summary: memorySummary,
+      missingTools
+    },
     inventory: inventorySnapshot(bot, options.maxInventoryItems),
     players: playersSnapshot(bot)
   }
