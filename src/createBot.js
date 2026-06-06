@@ -2,7 +2,8 @@ const mineflayer = require('mineflayer')
 const { pathfinder, Movements } = require('mineflayer-pathfinder')
 const pvp = require('mineflayer-pvp').plugin
 const { attachAiChat } = require('./aiChat')
-const { attachAiNpc } = require('./aiNpc')
+const { attachAiNpc, isAiNpcIdle } = require('./aiNpc')
+const { attachAiNpcScheduler } = require('./aiNpcScheduler')
 const { attachAutoEat } = require('./autoEat')
 const { resolveBotMemoryPaths } = require('./botMemory')
 const { buildBotOptions } = require('./config')
@@ -161,7 +162,14 @@ function createBot (options = buildBotOptions(), runtimeOptions = {}) {
   attachCombat(bot, { debugLog })
   attachAiChat(bot, { ...memoryOptions, debugLog, automationManager })
   const npcLife = createNpcLifeController(memoryOptions)
-  attachAiNpc(bot, { ...memoryOptions, debugLog, automationManager, followController, npcLife })
+  const aiNpcController = attachAiNpc(bot, { ...memoryOptions, debugLog, automationManager, followController, npcLife })
+  const aiNpcScheduler = attachAiNpcScheduler(bot, aiNpcController, {
+    ...memoryOptions,
+    debugLog,
+    automationManager,
+    followController,
+    shouldThink: () => isAiNpcIdle(bot, { automationManager, followController })
+  })
   attachErrorLogMonitor(bot, { debugLog, logPath: memoryOptions.debugLogPath })
   attachReconnectHandler(bot, {
     debugLog,
@@ -169,6 +177,8 @@ function createBot (options = buildBotOptions(), runtimeOptions = {}) {
   })
   attachShutdownHandlers(bot, runtimeOptions.shutdownSignals)
   if (logTerminal) bot.__logTerminal = logTerminal
+  bot.__aiNpcController = aiNpcController
+  bot.__aiNpcScheduler = aiNpcScheduler
   return bot
 }
 

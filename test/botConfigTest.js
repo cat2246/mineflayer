@@ -87,6 +87,7 @@ describe('holocraft bot config', function () {
       'mineflayer-pvp',
       '../src/aiChat',
       '../src/aiNpc',
+      '../src/aiNpcScheduler',
       '../src/autoEat',
       '../src/automations',
       '../src/combat',
@@ -136,7 +137,20 @@ describe('holocraft bot config', function () {
     })
     stubModule('mineflayer-pvp', { plugin: function pvpPlugin () {} })
     stubModule('../src/aiChat', { attachAiChat: (bot, options) => { calls.aiChat = options } })
-    stubModule('../src/aiNpc', { attachAiNpc: (bot, options) => { calls.aiNpc = options } })
+    stubModule('../src/aiNpc', {
+      attachAiNpc: (bot, options) => {
+        calls.aiNpc = options
+        calls.aiNpcController = { runNow: async () => ({ ok: true }) }
+        return calls.aiNpcController
+      },
+      isAiNpcIdle: () => true
+    })
+    stubModule('../src/aiNpcScheduler', {
+      attachAiNpcScheduler: (bot, controller, options) => {
+        calls.aiNpcScheduler = { controller, options }
+        return { stop: () => {} }
+      }
+    })
     stubModule('../src/autoEat', { attachAutoEat: (bot, options) => { calls.autoEat = options } })
     stubModule('../src/automations', {
       createAutomationManager: (bot, options) => {
@@ -220,6 +234,8 @@ describe('holocraft bot config', function () {
     assert.strictEqual(calls.aiChat.missingToolsPath, expected.missingToolsPath)
     assert.strictEqual(calls.aiChat.botMemoryRoot, expected.botMemoryRoot)
     assert.strictEqual(calls.aiNpc.missingToolsPath, expected.missingToolsPath)
+    assert.strictEqual(calls.aiNpcScheduler.controller, calls.aiNpcController)
+    assert.strictEqual(calls.aiNpcScheduler.options.debugLog, calls.aiNpc.debugLog)
     assert.strictEqual(calls.npcLife.npcLifePath, expected.npcLifePath)
     assert.strictEqual(calls.deathRecovery.placesPath, expected.placesPath)
     assert.strictEqual(calls.nightSafety.containerMemoryPath, expected.containerMemoryPath)
@@ -8721,6 +8737,148 @@ describe('holocraft bot config', function () {
 
     controller.stop()
     assert.deepStrictEqual(cleared, [])
+  })
+
+  it('schedules AI NPC thoughts after spawn and on slow idle ticks', async () => {
+    const { attachAiNpcScheduler } = require('../bot')
+    const bot = new EventEmitter()
+    const calls = []
+    const intervals = []
+    const timeouts = []
+
+    attachAiNpcScheduler(bot, {
+      runNow: async () => {
+        calls.push('run')
+        return { ok: true }
+      }
+    }, {
+      eventCooldownMs: 0,
+      idleIntervalMs: 1000,
+      setInterval: (callback, delayMs) => {
+        const timer = { callback, delayMs, unref: () => { timer.unrefCalled = true } }
+        intervals.push(timer)
+        return timer
+      },
+      setTimeout: (callback, delayMs) => {
+        const timer = { callback, delayMs, unref: () => { timer.unrefCalled = true } }
+        timeouts.push(timer)
+        return timer
+      },
+      spawnDelayMs: 25
+    })
+
+    assert.strictEqual(intervals.length, 1)
+    assert.strictEqual(intervals[0].delayMs, 1000)
+    assert.strictEqual(intervals[0].unrefCalled, true)
+
+    bot.emit('spawn')
+    assert.strictEqual(timeouts.length, 1)
+    assert.strictEqual(timeouts[0].delayMs, 25)
+    assert.strictEqual(timeouts[0].unrefCalled, true)
+
+    await timeouts[0].callback()
+    await intervals[0].callback()
+
+    assert.deepStrictEqual(calls, ['run', 'run'])
+  })
+
+  it('rate-limits repeated AI NPC scheduler triggers for the same reason', async () => {
+    const { attachAiNpcScheduler } = require('../bot')
+    const bot = new EventEmitter()
+    const calls = []
+    let now = 1000
+
+    const scheduler = attachAiNpcScheduler(bot, {
+      runNow: async () => {
+        calls.push(now)
+        return { ok: true }
+      }
+    }, {
+      eventCooldownMs: 500,
+      idleIntervalMs: 0,
+      now: () => now,
+      setInterval: () => {
+        throw new Error('idle interval should not be scheduled')
+      }
+    })
+
+    const first = await scheduler.trigger('tool-complete')
+    const second = await scheduler.trigger('tool-complete')
+    now = 1600
+    const third = await scheduler.trigger('tool-complete')
+
+    assert.strictEqual(first.skipped, false)
+    assert.strictEqual(second.skipped, true)
+    assert.strictEqual(second.reason, 'cooldown')
+    assert.strictEqual(third.skipped, false)
+    assert.deepStrictEqual(calls, [1000, 1600])
+  })
+
+  it('skips AI NPC scheduler triggers while the bot is obviously busy', async () => {
+    const { attachAiNpcScheduler } = require('../bot')
+    const bot = new EventEmitter()
+    bot.currentWindow = { title: 'Chest' }
+    let calls = 0
+
+    const scheduler = attachAiNpcScheduler(bot, {
+      runNow: async () => {
+        calls++
+        return { ok: true }
+      }
+    }, {
+      eventCooldownMs: 0,
+      idleIntervalMs: 0
+    })
+
+    const result = await scheduler.trigger('manual')
+
+    assert.strictEqual(result.skipped, true)
+    assert.strictEqual(result.reason, 'busy')
+    assert.strictEqual(calls, 0)
+  })
+
+  it('stops AI NPC scheduler timers when the bot ends', async () => {
+    const { attachAiNpcScheduler } = require('../bot')
+    const bot = new EventEmitter()
+    const intervals = []
+    const timeouts = []
+    const clearedIntervals = []
+    const clearedTimeouts = []
+    let calls = 0
+
+    attachAiNpcScheduler(bot, {
+      runNow: async () => {
+        calls++
+        return { ok: true }
+      }
+    }, {
+      eventCooldownMs: 0,
+      idleIntervalMs: 1000,
+      setInterval: (callback, delayMs) => {
+        const timer = { callback, delayMs }
+        intervals.push(timer)
+        return timer
+      },
+      clearInterval: timer => clearedIntervals.push(timer),
+      setTimeout: (callback, delayMs) => {
+        const timer = { callback, delayMs }
+        timeouts.push(timer)
+        return timer
+      },
+      clearTimeout: timer => clearedTimeouts.push(timer),
+      spawnDelayMs: 10
+    })
+
+    bot.emit('spawn')
+    bot.emit('end')
+
+    assert.deepStrictEqual(clearedIntervals, intervals)
+    assert.deepStrictEqual(clearedTimeouts, timeouts)
+
+    await timeouts[0].callback()
+    await intervals[0].callback()
+
+    assert.strictEqual(calls, 0)
   })
 
   it('includes NPC life state in AI NPC state snapshots', () => {
