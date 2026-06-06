@@ -12,6 +12,78 @@ const { readPlaceCoordinates, rememberPlaceCoordinates } = require('./places')
 
 const MAX_TOOL_TEXT_LENGTH = 160
 const SAFE_PLACE_NAME = /^[A-Za-z0-9_-]{1,32}$/
+const SAFE_CRAFT_RECIPES = {
+  crafting_table: [
+    { label: 'wood', names: ['oak_log', 'spruce_log', 'birch_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'mangrove_log', 'cherry_log', 'crimson_stem', 'warped_stem', 'oak_planks', 'spruce_planks', 'birch_planks', 'jungle_planks', 'acacia_planks', 'dark_oak_planks', 'mangrove_planks', 'cherry_planks', 'crimson_planks', 'warped_planks'], count: 1 }
+  ],
+  stick: [
+    { label: 'planks', names: ['oak_planks', 'spruce_planks', 'birch_planks', 'jungle_planks', 'acacia_planks', 'dark_oak_planks', 'mangrove_planks', 'cherry_planks', 'crimson_planks', 'warped_planks'], count: 2 }
+  ],
+  torch: [
+    { label: 'coal', names: ['coal', 'charcoal'], count: 1 },
+    { label: 'stick', names: ['stick'], count: 1 }
+  ],
+  chest: [
+    { label: 'planks', names: ['oak_planks', 'spruce_planks', 'birch_planks', 'jungle_planks', 'acacia_planks', 'dark_oak_planks', 'mangrove_planks', 'cherry_planks', 'crimson_planks', 'warped_planks'], count: 8 }
+  ],
+  furnace: [
+    { label: 'cobblestone', names: ['cobblestone', 'blackstone', 'cobbled_deepslate'], count: 8 }
+  ]
+}
+const FOOD_ITEM_NAMES = new Set([
+  'apple',
+  'baked_potato',
+  'beef',
+  'bread',
+  'carrot',
+  'cooked_beef',
+  'cooked_chicken',
+  'cooked_cod',
+  'cooked_mutton',
+  'cooked_porkchop',
+  'cooked_rabbit',
+  'cooked_salmon',
+  'golden_carrot',
+  'melon_slice',
+  'mushroom_stew',
+  'potato',
+  'pumpkin_pie'
+])
+const RAW_COOKABLE_FOOD_NAMES = new Set([
+  'beef',
+  'chicken',
+  'cod',
+  'mutton',
+  'porkchop',
+  'rabbit',
+  'raw_beef',
+  'raw_chicken',
+  'raw_cod',
+  'raw_mutton',
+  'raw_porkchop',
+  'raw_rabbit',
+  'raw_salmon',
+  'salmon'
+])
+const FUEL_ITEM_NAMES = new Set([
+  'coal',
+  'charcoal',
+  'dried_kelp_block',
+  'lava_bucket'
+])
+const SAFE_SMELT_ITEM_NAMES = new Set([
+  'cobblestone',
+  'copper_ore',
+  'deepslate_copper_ore',
+  'deepslate_gold_ore',
+  'deepslate_iron_ore',
+  'gold_ore',
+  'iron_ore',
+  'raw_copper',
+  'raw_gold',
+  'raw_iron',
+  ...RAW_COOKABLE_FOOD_NAMES
+])
 
 function compactText (value, fallback = '', maxLength = MAX_TOOL_TEXT_LENGTH) {
   const text = String(value || fallback)
@@ -170,6 +242,28 @@ function validateContainerSearchArgs (args) {
   }
 }
 
+function validateCraftItemArgs (args) {
+  const item = sanitizeItemNames(args.item || args.items)[0]
+  const count = positiveIntegerOrNull(args.count) || 1
+  if (!item) return { ok: false, reason: 'missing-item' }
+  if (!SAFE_CRAFT_RECIPES[item]) return { ok: false, reason: 'unsafe-recipe' }
+  if (count > 16) return { ok: false, reason: 'craft-count-too-large' }
+  return { ok: true, args: { item, count } }
+}
+
+function validateOptionalItemArgs (args) {
+  const item = sanitizeItemNames(args.item || args.items)[0] || null
+  return { ok: true, args: { item } }
+}
+
+function validateFurnaceItemArgs (args) {
+  const item = sanitizeItemNames(args.item || args.items)[0]
+  const count = positiveIntegerOrNull(args.count) || 1
+  if (!item) return { ok: false, reason: 'missing-item' }
+  if (!SAFE_SMELT_ITEM_NAMES.has(item)) return { ok: false, reason: 'unsafe-smelt-item' }
+  return { ok: true, args: { item, count } }
+}
+
 function passArgs (args) {
   return { ok: true, args: objectArgs(args) }
 }
@@ -180,6 +274,120 @@ function itemMatchesName (item, name) {
 
 function itemMatchesAnyName (item, names) {
   return names.some(name => itemMatchesName(item, name))
+}
+
+function inventoryItems (bot) {
+  return typeof bot.inventory?.items === 'function' ? bot.inventory.items() : []
+}
+
+function inventoryCountForNames (bot, names) {
+  return inventoryItems(bot)
+    .filter(item => itemMatchesAnyName(item, names))
+    .reduce((sum, item) => sum + item.count, 0)
+}
+
+function recipeMissingIngredients (bot, recipeName, multiplier = 1) {
+  return (SAFE_CRAFT_RECIPES[recipeName] || [])
+    .filter(ingredient => inventoryCountForNames(bot, ingredient.names) < ingredient.count * multiplier)
+    .map(ingredient => ingredient.label)
+}
+
+function itemIdByName (bot, itemName) {
+  return bot.registry?.itemsByName?.[itemName]?.id ?? null
+}
+
+function findInventoryItem (bot, itemName) {
+  return inventoryItems(bot).find(item => itemMatchesName(item, itemName))
+}
+
+function isFoodItem (bot, item) {
+  return Boolean(item?.name && (bot.registry?.foodsByName?.[item.name] || FOOD_ITEM_NAMES.has(item.name)))
+}
+
+function findFoodItem (bot, itemName) {
+  return inventoryItems(bot)
+    .filter(isFoodItem.bind(null, bot))
+    .find(item => !itemName || itemMatchesName(item, itemName)) || null
+}
+
+function isFuelItem (item) {
+  return Boolean(item?.name && FUEL_ITEM_NAMES.has(item.name))
+}
+
+function findFuelItem (bot) {
+  return inventoryItems(bot).find(isFuelItem) || null
+}
+
+function isBedBlockName (name = '') {
+  return /_bed$/i.test(name) || name === 'bed'
+}
+
+function isFurnaceBlockName (name = '') {
+  return /^(furnace|smoker|blast_furnace)$/i.test(name)
+}
+
+function findNearbyBlockForTool (bot, predicate, options = {}) {
+  const maxDistance = options.searchRadius || options.maxDistance || 8
+  if (typeof bot.findBlock === 'function') return bot.findBlock({ matching: predicate, maxDistance })
+  if (typeof bot.findBlocks !== 'function') return null
+  const position = bot.findBlocks({ matching: predicate, maxDistance, count: 16 })[0]
+  return position ? bot.blockAt(position) : null
+}
+
+function recordUnavailableTool (bot, tool, reason, options) {
+  const memoryPaths = resolveBotMemoryPaths(bot, options)
+  return recordMissingTool({
+    capability: `Unavailable tool support: ${tool}`,
+    desiredTool: tool,
+    blockedGoal: 'NPC survival action',
+    reason,
+    priority: 'medium'
+  }, {
+    ...options,
+    missingToolsPath: options.missingToolsPath || memoryPaths.missingToolsPath
+  })
+}
+
+function furnaceInputCount (item, requestedCount) {
+  return Math.min(item.count, requestedCount)
+}
+
+async function putItemInFurnace (bot, args, options = {}) {
+  if (typeof bot.openFurnace !== 'function') {
+    return { ok: false, reason: 'furnace-support-unavailable', missingTool: recordUnavailableTool(bot, 'openFurnace', 'Bot cannot open furnaces.', options) }
+  }
+
+  const input = findInventoryItem(bot, args.item)
+  if (!input) return { ok: false, reason: 'missing-ingredients', missingIngredients: [args.item] }
+
+  const fuel = findFuelItem(bot)
+  if (!fuel) return { ok: false, reason: 'missing-ingredients', missingIngredients: ['fuel'] }
+
+  const furnaceBlock = findNearbyBlockForTool(bot, block => isFurnaceBlockName(block.name), options)
+  if (!furnaceBlock) return { ok: false, reason: 'missing-furnace' }
+
+  const furnace = await bot.openFurnace(furnaceBlock)
+  const count = furnaceInputCount(input, args.count)
+  try {
+    if (typeof furnace.outputItem === 'function' && furnace.outputItem() && typeof furnace.takeOutput === 'function') {
+      await furnace.takeOutput()
+    }
+    if (typeof furnace.fuelItem === 'function' && !furnace.fuelItem()) {
+      await furnace.putFuel(fuel.type, fuel.metadata ?? null, 1)
+    }
+    if (typeof furnace.inputItem === 'function' && !furnace.inputItem()) {
+      await furnace.putInput(input.type, input.metadata ?? null, count)
+    }
+  } finally {
+    if (typeof furnace.close === 'function') furnace.close()
+  }
+
+  return {
+    input: input.name,
+    count,
+    fuel: fuel.name,
+    furnace: containerBlockSnapshot(furnaceBlock)
+  }
 }
 
 function containerBlockSnapshot (block) {
@@ -417,6 +625,105 @@ function toolDefinitions () {
           memory: readContainerMemory(options)
         }
       }
+    },
+    {
+      name: 'list_craftable_items',
+      description: 'List conservative safe crafting recipes and current missing ingredients.',
+      validate: passArgs,
+      execute: async bot => ({
+        items: Object.keys(SAFE_CRAFT_RECIPES).map(name => {
+          const missingIngredients = recipeMissingIngredients(bot, name)
+          return {
+            name,
+            craftable: missingIngredients.length === 0,
+            missingIngredients
+          }
+        })
+      })
+    },
+    {
+      name: 'craft_item',
+      description: 'Craft a known safe recipe if ingredients and Mineflayer crafting support are available.',
+      validate: validateCraftItemArgs,
+      execute: async (bot, args, options) => {
+        if (typeof bot.recipesFor !== 'function' || typeof bot.craft !== 'function') {
+          return {
+            ok: false,
+            reason: 'crafting-support-unavailable',
+            missingTool: recordUnavailableTool(bot, 'craft_item', 'Bot cannot inspect recipes or craft items.', options)
+          }
+        }
+
+        const missingIngredients = recipeMissingIngredients(bot, args.item, args.count)
+        if (missingIngredients.length > 0) {
+          return { ok: false, reason: 'missing-ingredients', missingIngredients }
+        }
+
+        const itemType = itemIdByName(bot, args.item)
+        if (itemType === null) return { ok: false, reason: 'unknown-item' }
+        const recipes = bot.recipesFor(itemType, null, args.count)
+        const recipe = Array.isArray(recipes) ? recipes[0] : null
+        if (!recipe) return { ok: false, reason: 'missing-recipe' }
+
+        await bot.craft(recipe, args.count)
+        return { item: args.item, count: args.count }
+      }
+    },
+    {
+      name: 'eat_food',
+      description: 'Eat selected or best available food from inventory.',
+      validate: validateOptionalItemArgs,
+      execute: async (bot, args, options) => {
+        if (typeof bot.consume !== 'function' || typeof bot.equip !== 'function') {
+          return {
+            ok: false,
+            reason: 'eating-support-unavailable',
+            missingTool: recordUnavailableTool(bot, 'eat_food', 'Bot cannot equip and consume food.', options)
+          }
+        }
+        const food = findFoodItem(bot, args.item)
+        if (!food) return { ok: false, reason: 'missing-food' }
+        await bot.equip(food, 'hand')
+        await bot.consume()
+        return { item: food.name, food: typeof bot.food === 'number' ? bot.food : null }
+      }
+    },
+    {
+      name: 'sleep_if_possible',
+      description: 'Sleep in a nearby bed when the world allows it.',
+      validate: passArgs,
+      execute: async (bot, args, options) => {
+        if (typeof bot.sleep !== 'function') {
+          return {
+            ok: false,
+            reason: 'sleep-support-unavailable',
+            missingTool: recordUnavailableTool(bot, 'sleep_if_possible', 'Bot cannot sleep in beds.', options)
+          }
+        }
+        const bed = findNearbyBlockForTool(bot, block => isBedBlockName(block.name), options)
+        if (!bed) return { ok: false, reason: 'missing-bed' }
+        try {
+          await bot.sleep(bed)
+          return { bed: containerBlockSnapshot(bed) }
+        } catch (err) {
+          return { ok: false, reason: 'sleep-failed', message: compactText(err.message, 'Sleep failed', 160) }
+        }
+      }
+    },
+    {
+      name: 'cook_food',
+      description: 'Start cooking raw food in a nearby furnace with available fuel.',
+      validate: validateFurnaceItemArgs,
+      execute: async (bot, args, options) => {
+        if (!RAW_COOKABLE_FOOD_NAMES.has(args.item)) return { ok: false, reason: 'not-cookable-food' }
+        return putItemInFurnace(bot, args, options)
+      }
+    },
+    {
+      name: 'smelt_item',
+      description: 'Start smelting a safe ore or simple input in a nearby furnace with available fuel.',
+      validate: validateFurnaceItemArgs,
+      execute: async (bot, args, options) => putItemInFurnace(bot, args, options)
     }
   ]
 }

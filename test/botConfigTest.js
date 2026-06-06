@@ -9560,7 +9560,13 @@ describe('holocraft bot config', function () {
       'withdraw_items',
       'equip_item',
       'find_container',
-      'remember_container'
+      'remember_container',
+      'list_craftable_items',
+      'craft_item',
+      'eat_food',
+      'sleep_if_possible',
+      'cook_food',
+      'smelt_item'
     ])
   })
 
@@ -9736,6 +9742,161 @@ describe('holocraft bot config', function () {
     assert.strictEqual(found.result.containers.length, 2)
     assert.strictEqual(remembered.ok, true)
     assert.strictEqual(Object.keys(memory.containers).length, 2)
+  })
+
+  it('validates AI NPC crafting and survival tools before execution', () => {
+    const { validateAiNpcToolCall } = require('../bot')
+
+    assert.deepStrictEqual(validateAiNpcToolCall({
+      tool: 'craft_item',
+      args: { item: 'crafting_table', count: 1 }
+    }), {
+      ok: true,
+      tool: 'craft_item',
+      args: { item: 'crafting_table', count: 1 }
+    })
+
+    assert.deepStrictEqual(validateAiNpcToolCall({
+      tool: 'craft_item',
+      args: { item: 'diamond_sword' }
+    }), {
+      ok: false,
+      tool: 'craft_item',
+      reason: 'unsafe-recipe'
+    })
+
+    assert.deepStrictEqual(validateAiNpcToolCall({
+      tool: 'eat_food',
+      args: { item: 'bread' }
+    }), {
+      ok: true,
+      tool: 'eat_food',
+      args: { item: 'bread' }
+    })
+
+    assert.deepStrictEqual(validateAiNpcToolCall({
+      tool: 'smelt_item',
+      args: { item: 'iron_ore', count: 3 }
+    }), {
+      ok: true,
+      tool: 'smelt_item',
+      args: { item: 'iron_ore', count: 3 }
+    })
+  })
+
+  it('lists safe craftable items and explains missing ingredients', async () => {
+    const { executeAiNpcTool } = require('../bot')
+    const bot = survivalToolBot()
+    bot.inventory.items = () => [{ name: 'oak_log', type: 17, metadata: 0, count: 1 }]
+    bot.recipesFor = (type) => type === 58 ? [{ id: 'crafting_table_recipe' }] : []
+
+    const listed = await executeAiNpcTool(bot, {
+      tool: 'list_craftable_items',
+      args: {}
+    })
+    const missing = await executeAiNpcTool(bot, {
+      tool: 'craft_item',
+      args: { item: 'torch', count: 1 }
+    })
+
+    assert.strictEqual(listed.ok, true)
+    assert(listed.result.items.some(item => item.name === 'crafting_table' && item.craftable))
+    assert.strictEqual(missing.ok, false)
+    assert.strictEqual(missing.reason, 'missing-ingredients')
+    assert.deepStrictEqual(missing.result.missingIngredients, ['coal', 'stick'])
+  })
+
+  it('crafts known safe recipes through the NPC tool registry', async () => {
+    const { executeAiNpcTool } = require('../bot')
+    const events = []
+    const bot = survivalToolBot(events)
+    bot.inventory.items = () => [{ name: 'oak_log', type: 17, metadata: 0, count: 1 }]
+    bot.recipesFor = (type, metadata, count) => type === 58 && count === 1 ? [{ id: 'crafting_table_recipe' }] : []
+    bot.craft = async (recipe, count) => events.push(['craft', recipe.id, count])
+
+    const result = await executeAiNpcTool(bot, {
+      tool: 'craft_item',
+      args: { item: 'crafting_table', count: 1 }
+    })
+
+    assert.strictEqual(result.ok, true)
+    assert.deepStrictEqual(events, [['craft', 'crafting_table_recipe', 1]])
+  })
+
+  it('eats selected food through the NPC tool registry', async () => {
+    const { executeAiNpcTool } = require('../bot')
+    const events = []
+    const bot = survivalToolBot(events)
+    bot.food = 8
+    bot.inventory.items = () => [{ name: 'bread', type: 297, metadata: 0, count: 2 }]
+    bot.consume = async () => events.push(['consume'])
+
+    const result = await executeAiNpcTool(bot, {
+      tool: 'eat_food',
+      args: { item: 'bread' }
+    })
+
+    assert.strictEqual(result.ok, true)
+    assert.deepStrictEqual(events, [
+      ['equip', 'bread', 'hand'],
+      ['consume']
+    ])
+  })
+
+  it('sleeps in a nearby bed when sleep is possible', async () => {
+    const { executeAiNpcTool } = require('../bot')
+    const events = []
+    const bed = block('white_bed', 1, 64, 0)
+    const bot = survivalToolBot(events, [bed])
+    bot.time = { isDay: false, timeOfDay: 14000 }
+    bot.sleep = async target => events.push(['sleep', target.name])
+
+    const result = await executeAiNpcTool(bot, {
+      tool: 'sleep_if_possible',
+      args: {}
+    })
+
+    assert.strictEqual(result.ok, true)
+    assert.deepStrictEqual(events, [['sleep', 'white_bed']])
+  })
+
+  it('cooks food and smelts items with a nearby furnace', async () => {
+    const { executeAiNpcTool } = require('../bot')
+    const events = []
+    const furnace = block('furnace', 1, 64, 0)
+    const bot = survivalToolBot(events, [furnace])
+    bot.inventory.items = () => [
+      { name: 'raw_beef', type: 363, metadata: 0, count: 2 },
+      { name: 'iron_ore', type: 15, metadata: 0, count: 3 },
+      { name: 'coal', type: 263, metadata: 0, count: 4 }
+    ]
+    bot.openFurnace = async target => {
+      events.push(['openFurnace', target.name])
+      return {
+        outputItem: () => null,
+        fuelItem: () => null,
+        inputItem: () => null,
+        putFuel: async (type, metadata, count) => events.push(['putFuel', type, metadata, count]),
+        putInput: async (type, metadata, count) => events.push(['putInput', type, metadata, count]),
+        close: () => events.push(['close'])
+      }
+    }
+
+    const cooked = await executeAiNpcTool(bot, {
+      tool: 'cook_food',
+      args: { item: 'raw_beef', count: 2 }
+    })
+    const smelted = await executeAiNpcTool(bot, {
+      tool: 'smelt_item',
+      args: { item: 'iron_ore', count: 3 }
+    })
+
+    assert.strictEqual(cooked.ok, true)
+    assert.strictEqual(smelted.ok, true)
+    assert.deepStrictEqual(events.filter(event => event[0] === 'putInput'), [
+      ['putInput', 363, 0, 2],
+      ['putInput', 15, 0, 3]
+    ])
   })
 
   it('executes registered AI NPC tools with normalized results', async () => {
@@ -10076,6 +10237,37 @@ function blockBot (blocks = [], events = []) {
     equip: async (item, destination) => events.push(['equip', item.name, destination]),
     dig: async target => events.push(['dig', target.name])
   }
+}
+
+function survivalToolBot (events = [], blocks = []) {
+  const bot = blockBot(blocks, events)
+  bot.registry = {
+    itemsByName: {
+      crafting_table: { id: 58 },
+      torch: { id: 50 },
+      bread: { id: 297 },
+      raw_beef: { id: 363 },
+      iron_ore: { id: 15 },
+      coal: { id: 263 }
+    },
+    foodsByName: {
+      bread: {},
+      cooked_beef: {}
+    }
+  }
+  bot.inventory.items = () => []
+  bot.recipesFor = () => []
+  bot.craft = async (recipe, count) => events.push(['craft', recipe.id, count])
+  bot.equip = async (item, destination) => events.push(['equip', item.name, destination])
+  bot.findBlocks = ({ matching }) => blocks
+    .filter(candidate => matching(candidate))
+    .map(candidate => candidate.position)
+  bot.blockAt = position => blocks.find(candidate =>
+    candidate.position.x === position.x &&
+    candidate.position.y === position.y &&
+    candidate.position.z === position.z
+  ) || null
+  return bot
 }
 
 function block (name, x, y, z) {
