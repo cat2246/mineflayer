@@ -45,6 +45,11 @@ describe('holocraft bot config', function () {
 
     assert.strictEqual(paths.botId, 'pyro-farm-bot')
     assert.strictEqual(paths.root, path.join(root, 'pyro-farm-bot'))
+    assert.strictEqual(paths.chatMemoryPath, path.join(root, 'pyro-farm-bot', 'memory.md'))
+    assert.strictEqual(paths.containerMemoryPath, path.join(root, 'pyro-farm-bot', 'containers.json'))
+    assert.strictEqual(paths.pyroFarmMemoryPath, path.join(root, 'pyro-farm-bot', 'pyro-farming.json'))
+    assert.strictEqual(paths.placesPath, path.join(root, 'pyro-farm-bot', 'places.json'))
+    assert.strictEqual(paths.npcLifePath, path.join(root, 'pyro-farm-bot', 'npc-life.json'))
     assert.strictEqual(paths.missingToolsPath, path.join(root, 'pyro-farm-bot', 'missing-tools.json'))
     assert.strictEqual(paths.memorySummaryPath, path.join(root, 'pyro-farm-bot', 'memory-summary.json'))
     assert.strictEqual(paths.eventLogPath, path.join(root, 'pyro-farm-bot', 'event-log.jsonl'))
@@ -62,6 +67,169 @@ describe('holocraft bot config', function () {
 
     assert.strictEqual(paths.botId, '1234-abcd-main')
     assert.strictEqual(paths.root, path.join(root, '1234-abcd-main'))
+  })
+
+  it('wires launched bots to their own memory paths', () => {
+    const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'bot-memory-')), 'bots')
+    const calls = {
+      debugEvents: []
+    }
+    const fakeBot = new EventEmitter()
+    fakeBot.username = 'Memory Bot/One'
+    fakeBot.players = {}
+    fakeBot.loadPlugin = plugin => { calls.plugin = plugin }
+    fakeBot.pathfinder = { setMovements: movements => { calls.movements = movements } }
+    fakeBot.quit = () => {}
+
+    const modulePaths = [
+      'mineflayer',
+      'mineflayer-pathfinder',
+      'mineflayer-pvp',
+      '../src/aiChat',
+      '../src/aiNpc',
+      '../src/autoEat',
+      '../src/automations',
+      '../src/combat',
+      '../src/commandConsole',
+      '../src/deathRecovery',
+      '../src/debugLogger',
+      '../src/eventLogging',
+      '../src/follow',
+      '../src/issueRecorder',
+      '../src/knockbackPause',
+      '../src/logTerminal',
+      '../src/nightSafety',
+      '../src/npcLife',
+      '../src/viewer'
+    ]
+    const originals = new Map()
+
+    function stubModule (request, exports) {
+      const resolved = require.resolve(request)
+      originals.set(resolved, require.cache[resolved])
+      require.cache[resolved] = {
+        id: resolved,
+        filename: resolved,
+        loaded: true,
+        exports
+      }
+    }
+
+    for (const request of modulePaths) {
+      const resolved = require.resolve(request)
+      originals.set(resolved, require.cache[resolved])
+    }
+
+    stubModule('mineflayer', {
+      createBot: options => {
+        calls.mineflayerOptions = options
+        return fakeBot
+      }
+    })
+    stubModule('mineflayer-pathfinder', {
+      pathfinder: function pathfinderPlugin () {},
+      Movements: class Movements {
+        constructor (bot) {
+          this.bot = bot
+        }
+      }
+    })
+    stubModule('mineflayer-pvp', { plugin: function pvpPlugin () {} })
+    stubModule('../src/aiChat', { attachAiChat: (bot, options) => { calls.aiChat = options } })
+    stubModule('../src/aiNpc', { attachAiNpc: (bot, options) => { calls.aiNpc = options } })
+    stubModule('../src/autoEat', { attachAutoEat: (bot, options) => { calls.autoEat = options } })
+    stubModule('../src/automations', {
+      createAutomationManager: (bot, options) => {
+        calls.automation = options
+        return { name: 'automation-manager' }
+      }
+    })
+    stubModule('../src/combat', { attachCombat: (bot, options) => { calls.combat = options } })
+    stubModule('../src/commandConsole', { startConsole: (bot, options) => { calls.console = options } })
+    stubModule('../src/deathRecovery', { attachDeathRecovery: (bot, options) => { calls.deathRecovery = options } })
+    stubModule('../src/debugLogger', {
+      createDebugLogger: (fileSystem, logPath) => {
+        calls.debugLogger = { fileSystem, logPath }
+        return (event, data) => calls.debugEvents.push([event, data])
+      }
+    })
+    stubModule('../src/eventLogging', {
+      attachEventLogging: (bot, options) => {
+        calls.eventLogging = options
+        return bot
+      }
+    })
+    stubModule('../src/follow', { attachFollowController: (bot, options) => { calls.follow = options; return {} } })
+    stubModule('../src/issueRecorder', { attachErrorLogMonitor: (bot, options) => { calls.errorLogMonitor = options } })
+    stubModule('../src/knockbackPause', { attachKnockbackPause: (bot, options) => { calls.knockback = options; return {} } })
+    stubModule('../src/logTerminal', {
+      startLogTerminal: options => {
+        calls.logTerminal = options
+        return { name: 'log-terminal' }
+      }
+    })
+    stubModule('../src/nightSafety', { attachNightSafety: (bot, options) => { calls.nightSafety = options; return {} } })
+    stubModule('../src/npcLife', {
+      createNpcLifeController: options => {
+        calls.npcLife = options
+        return { name: 'npc-life' }
+      }
+    })
+    stubModule('../src/viewer', { closeViewer: () => {} })
+
+    const createBotPath = require.resolve('../src/createBot')
+    const originalCreateBot = require.cache[createBotPath]
+    delete require.cache[createBotPath]
+
+    try {
+      const { createBot } = require('../src/createBot')
+      createBot({
+        host: 'localhost',
+        port: 25565,
+        username: 'Memory Bot/One',
+        version: '1.21.10',
+        auth: 'offline'
+      }, {
+        botMemoryRoot: root,
+        shutdownSignals: []
+      })
+    } finally {
+      delete require.cache[createBotPath]
+      if (originalCreateBot) require.cache[createBotPath] = originalCreateBot
+      for (const [resolved, original] of originals.entries()) {
+        if (original) require.cache[resolved] = original
+        else delete require.cache[resolved]
+      }
+    }
+
+    const expectedRoot = path.join(root, 'memory-bot-one')
+    const expected = {
+      botMemoryRoot: root,
+      botId: 'memory-bot-one',
+      memoryPath: path.join(expectedRoot, 'memory.md'),
+      containerMemoryPath: path.join(expectedRoot, 'containers.json'),
+      pyroFarmMemoryPath: path.join(expectedRoot, 'pyro-farming.json'),
+      placesPath: path.join(expectedRoot, 'places.json'),
+      npcLifePath: path.join(expectedRoot, 'npc-life.json'),
+      missingToolsPath: path.join(expectedRoot, 'missing-tools.json'),
+      debugLogPath: path.join(expectedRoot, 'debug.log')
+    }
+
+    assert.strictEqual(calls.debugLogger.logPath, expected.debugLogPath)
+    assert.strictEqual(calls.aiChat.memoryPath, expected.memoryPath)
+    assert.strictEqual(calls.aiChat.missingToolsPath, expected.missingToolsPath)
+    assert.strictEqual(calls.aiChat.botMemoryRoot, expected.botMemoryRoot)
+    assert.strictEqual(calls.aiNpc.missingToolsPath, expected.missingToolsPath)
+    assert.strictEqual(calls.npcLife.npcLifePath, expected.npcLifePath)
+    assert.strictEqual(calls.deathRecovery.placesPath, expected.placesPath)
+    assert.strictEqual(calls.nightSafety.containerMemoryPath, expected.containerMemoryPath)
+    assert.strictEqual(calls.nightSafety.placesPath, expected.placesPath)
+    assert.strictEqual(calls.console.debugLogPath, expected.debugLogPath)
+    assert.strictEqual(calls.logTerminal.logPath, expected.debugLogPath)
+    assert.strictEqual(calls.automation.containerMemoryPath, expected.containerMemoryPath)
+    assert.strictEqual(calls.automation.pyroFarmMemoryPath, expected.pyroFarmMemoryPath)
+    assert.strictEqual(calls.automation.placesPath, expected.placesPath)
+    assert.strictEqual(calls.errorLogMonitor.logPath, expected.debugLogPath)
   })
 
   it('normalizes malformed NPC life state safely', () => {
@@ -2282,6 +2450,65 @@ describe('holocraft bot config', function () {
     ])
   })
 
+  it('passes per-bot memory paths to default automation starts', async () => {
+    const { createAutomationManager } = require('../bot')
+    const bot = new EventEmitter()
+    const started = []
+    const memoryOptions = {
+      botId: 'memory-bot-one',
+      botMemoryRoot: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'bot-memory-')), 'bots'),
+      memoryPath: 'memory.md',
+      containerMemoryPath: 'containers.json',
+      pyroFarmMemoryPath: 'pyro-farming.json',
+      placesPath: 'places.json',
+      npcLifePath: 'npc-life.json',
+      missingToolsPath: 'missing-tools.json',
+      debugLogPath: 'debug.log'
+    }
+    const automationManager = createAutomationManager(bot, {
+      ...memoryOptions,
+      output: () => {},
+      debugLog: () => {},
+      startWoodCuttingAutomation: (bot, options) => {
+        started.push(['wood', options])
+        return { stop: () => {} }
+      },
+      startFarmingAutomation: (bot, options) => {
+        started.push(['farming', options])
+        return { stop: () => {} }
+      },
+      startWildRoamingAutomation: (bot, options) => {
+        started.push(['wild', options])
+        return { stop: () => {} }
+      },
+      startPyroFarmingAutomation: (bot, options) => {
+        started.push(['pyro', options])
+        return { stop: () => {} }
+      },
+      startMiningAutomation: (bot, options) => {
+        started.push(['mining', options])
+        return { stop: () => {} }
+      }
+    })
+
+    await automationManager.startByIndex(0)
+    await automationManager.startByIndex(3)
+    await automationManager.startByIndex(4)
+
+    assert.deepStrictEqual(started.map(([name]) => name), ['wood', 'pyro', 'mining'])
+    for (const [, options] of started) {
+      assert.strictEqual(options.botId, memoryOptions.botId)
+      assert.strictEqual(options.botMemoryRoot, memoryOptions.botMemoryRoot)
+      assert.strictEqual(options.memoryPath, memoryOptions.memoryPath)
+      assert.strictEqual(options.containerMemoryPath, memoryOptions.containerMemoryPath)
+      assert.strictEqual(options.pyroFarmMemoryPath, memoryOptions.pyroFarmMemoryPath)
+      assert.strictEqual(options.placesPath, memoryOptions.placesPath)
+      assert.strictEqual(options.npcLifePath, memoryOptions.npcLifePath)
+      assert.strictEqual(options.missingToolsPath, memoryOptions.missingToolsPath)
+      assert.strictEqual(options.debugLogPath, memoryOptions.debugLogPath)
+    }
+  })
+
   it('prints automation task completion status to the terminal', async () => {
     const { startFarmingAutomation } = require('../bot')
     const output = []
@@ -2693,7 +2920,9 @@ describe('holocraft bot config', function () {
     const output = []
     const events = []
     const bot = new EventEmitter()
+    const debugLogPath = path.join('data', 'bots', 'console-bot', 'debug.log')
     const consoleController = createCommandConsole(bot, {
+      debugLogPath,
       output: message => output.push(message),
       knockbackController: {
         toggleDebug: () => {
@@ -2707,6 +2936,7 @@ describe('holocraft bot config', function () {
 
     assert.deepStrictEqual(events, [['toggleKnockbackDebug']])
     assert(output.some(message => message.includes('Knockback debug enabled.')))
+    assert(output.some(message => message.includes(path.relative(process.cwd(), debugLogPath))))
   })
 
   it('refuses to follow players not in the server', async () => {
@@ -7316,7 +7546,7 @@ describe('holocraft bot config', function () {
     ])
   })
 
-  it('only auto-searches trapped chests when looking for containers', async () => {
+  it('auto-searches chests, barrels, and trapped chests when looking for containers', async () => {
     const { visitNearbyContainers } = require('../bot')
     const events = []
     const bot = blockBot([
@@ -7336,10 +7566,14 @@ describe('holocraft bot config', function () {
       containerInteractionDelayMs: 0,
       containerMemoryPath: tempContainerMemoryPath(),
       houseOnly: false
-    }, async () => true)
+    }, async () => false)
 
-    assert.strictEqual(visited, true)
+    assert.strictEqual(visited, false)
     assert.deepStrictEqual(events, [
+      ['openContainer', 'chest', 1],
+      ['close', 'chest', 1],
+      ['openContainer', 'barrel', 2],
+      ['close', 'barrel', 2],
       ['openContainer', 'trapped_chest', 3],
       ['close', 'trapped_chest', 3]
     ])
@@ -8044,6 +8278,7 @@ describe('holocraft bot config', function () {
     const { createCommandConsole } = require('../bot')
     const output = []
     const bot = new EventEmitter()
+    const debugLogPath = path.join('data', 'bots', 'homes-bot', 'debug.log')
 
     bot.chat = () => {
       process.nextTick(() => {
@@ -8065,12 +8300,14 @@ describe('holocraft bot config', function () {
     }
 
     const consoleController = createCommandConsole(bot, {
+      debugLogPath,
       output: (message) => output.push(message)
     })
 
     await consoleController.handleLine('/home')
 
     assert(output.some(message => message.includes('No homes found')))
+    assert(output.some(message => message.includes(path.relative(process.cwd(), debugLogPath))))
     assert(!output.some(message => message.includes('slot 1')))
     assert(!output.some(message => message.includes('player_head')))
   })

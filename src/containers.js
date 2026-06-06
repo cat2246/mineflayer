@@ -54,7 +54,7 @@ function entityEyePosition (bot) {
 }
 
 function isContainerBlockName (name = '') {
-  return /^trapped_chest$/i.test(name)
+  return /^(chest|trapped_chest|barrel)$/i.test(name)
 }
 
 function isChestBlockName (name = '') {

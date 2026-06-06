@@ -15,7 +15,20 @@ function parseMessageCommand (command) {
 function createCommandConsole (bot, options = {}) {
   const output = options.output || console.log
   const debugLog = options.debugLog || (() => {})
-  const automationManager = options.automationManager || createAutomationManager(bot, { output, debugLog })
+  const debugLogPath = options.debugLogPath || DEBUG_LOG_PATH
+  const automationManager = options.automationManager || createAutomationManager(bot, {
+    output,
+    debugLog,
+    botId: options.botId,
+    botMemoryRoot: options.botMemoryRoot,
+    memoryPath: options.memoryPath,
+    containerMemoryPath: options.containerMemoryPath,
+    pyroFarmMemoryPath: options.pyroFarmMemoryPath,
+    placesPath: options.placesPath,
+    npcLifePath: options.npcLifePath,
+    missingToolsPath: options.missingToolsPath,
+    debugLogPath
+  })
   const followController = options.followController || createFollowController(bot, { output, debugLog })
   const knockbackController = options.knockbackController
   const nightSafetyController = options.nightSafetyController
@@ -143,7 +156,7 @@ function createCommandConsole (bot, options = {}) {
       }
       const result = knockbackController.toggleDebug()
       output(result.message)
-      if (result.enabled) output(`Hit the bot once, then check ${path.relative(process.cwd(), DEBUG_LOG_PATH)}.`)
+      if (result.enabled) output(`Hit the bot once, then check ${path.relative(process.cwd(), debugLogPath)}.`)
       return
     }
 
@@ -185,7 +198,7 @@ function createCommandConsole (bot, options = {}) {
       pendingHomes = menu.homes
       if (pendingHomes.length === 0) {
         pendingHomes = null
-        output(`No homes found in the homes menu. Details were written to ${path.relative(process.cwd(), DEBUG_LOG_PATH)}.`)
+        output(`No homes found in the homes menu. Details were written to ${path.relative(process.cwd(), debugLogPath)}.`)
         return
       }
 

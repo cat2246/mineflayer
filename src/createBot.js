@@ -4,6 +4,7 @@ const pvp = require('mineflayer-pvp').plugin
 const { attachAiChat } = require('./aiChat')
 const { attachAiNpc } = require('./aiNpc')
 const { attachAutoEat } = require('./autoEat')
+const { resolveBotMemoryPaths } = require('./botMemory')
 const { buildBotOptions } = require('./config')
 const { attachCombat } = require('./combat')
 const { startConsole } = require('./commandConsole')
@@ -94,11 +95,44 @@ function attachReconnectHandler (bot, options = {}) {
 }
 
 function createBot (options = buildBotOptions(), runtimeOptions = {}) {
-  const debugLog = createDebugLogger()
+  const memoryPaths = resolveBotMemoryPaths({
+    username: options.username,
+    profile: options.profile || runtimeOptions.botProfile
+  }, {
+    botId: options.botId || runtimeOptions.botId,
+    botMemoryRoot: options.botMemoryRoot || runtimeOptions.botMemoryRoot
+  })
+  const memoryOptions = {
+    botId: memoryPaths.botId,
+    botMemoryRoot: options.botMemoryRoot || runtimeOptions.botMemoryRoot,
+    memoryPath: options.memoryPath || runtimeOptions.memoryPath || memoryPaths.chatMemoryPath,
+    containerMemoryPath: options.containerMemoryPath || runtimeOptions.containerMemoryPath || memoryPaths.containerMemoryPath,
+    pyroFarmMemoryPath: options.pyroFarmMemoryPath || runtimeOptions.pyroFarmMemoryPath || memoryPaths.pyroFarmMemoryPath,
+    placesPath: options.placesPath || runtimeOptions.placesPath || memoryPaths.placesPath,
+    npcLifePath: options.npcLifePath || runtimeOptions.npcLifePath || memoryPaths.npcLifePath,
+    missingToolsPath: options.missingToolsPath || runtimeOptions.missingToolsPath || memoryPaths.missingToolsPath,
+    debugLogPath: options.debugLogPath || runtimeOptions.debugLogPath || memoryPaths.debugLogPath
+  }
+  const debugLog = createDebugLogger(undefined, memoryOptions.debugLogPath)
+  const logTerminal = Object.prototype.hasOwnProperty.call(runtimeOptions, 'logTerminal')
+    ? runtimeOptions.logTerminal
+    : startLogTerminal({
+      ...(runtimeOptions.logTerminalOptions || {}),
+      logPath: memoryOptions.debugLogPath
+    })
   const mineflayerOptions = { ...options }
   delete mineflayerOptions.serverLabel
   delete mineflayerOptions.serverLoginPassword
   delete mineflayerOptions.logTerminal
+  delete mineflayerOptions.botMemoryRoot
+  delete mineflayerOptions.botId
+  delete mineflayerOptions.memoryPath
+  delete mineflayerOptions.containerMemoryPath
+  delete mineflayerOptions.pyroFarmMemoryPath
+  delete mineflayerOptions.placesPath
+  delete mineflayerOptions.npcLifePath
+  delete mineflayerOptions.missingToolsPath
+  delete mineflayerOptions.debugLogPath
   debugLog('bot.start', {
     host: mineflayerOptions.host,
     port: mineflayerOptions.port,
@@ -117,40 +151,35 @@ function createBot (options = buildBotOptions(), runtimeOptions = {}) {
     const movements = configureConservativeMovements(new Movements(bot))
     bot.pathfinder.setMovements(movements)
   })
-  attachDeathRecovery(bot, { debugLog })
+  attachDeathRecovery(bot, { ...memoryOptions, debugLog })
   attachAutoEat(bot, { debugLog })
-  const automationManager = createAutomationManager(bot, { debugLog })
+  const automationManager = createAutomationManager(bot, { ...memoryOptions, debugLog })
   const followController = attachFollowController(bot, { debugLog })
   const knockbackController = attachKnockbackPause(bot, { debugLog })
-  const nightSafetyController = attachNightSafety(bot, { debugLog, automationManager })
-  startConsole(bot, { debugLog, automationManager, followController, knockbackController, nightSafetyController })
+  const nightSafetyController = attachNightSafety(bot, { ...memoryOptions, debugLog, automationManager })
+  startConsole(bot, { ...memoryOptions, debugLog, automationManager, followController, knockbackController, nightSafetyController })
   attachCombat(bot, { debugLog })
-  attachAiChat(bot, { debugLog, automationManager })
-  const npcLife = createNpcLifeController()
-  attachAiNpc(bot, { debugLog, automationManager, followController, npcLife })
-  attachErrorLogMonitor(bot, { debugLog })
+  attachAiChat(bot, { ...memoryOptions, debugLog, automationManager })
+  const npcLife = createNpcLifeController(memoryOptions)
+  attachAiNpc(bot, { ...memoryOptions, debugLog, automationManager, followController, npcLife })
+  attachErrorLogMonitor(bot, { debugLog, logPath: memoryOptions.debugLogPath })
   attachReconnectHandler(bot, {
     debugLog,
-    reconnect: () => createBot(options, runtimeOptions)
+    reconnect: () => createBot(options, { ...runtimeOptions, logTerminal })
   })
-  attachShutdownHandlers(bot)
+  attachShutdownHandlers(bot, runtimeOptions.shutdownSignals)
+  if (logTerminal) bot.__logTerminal = logTerminal
   return bot
 }
 
 function start (options = {}) {
-  const logTerminal = startLogTerminal()
   const { startInteractiveMenu } = require('./startMenu')
   return startInteractiveMenu({
     ...options,
     createBot: (botOptions, runtimeOptions = {}) => {
-      const bot = createBot(botOptions, {
-        ...runtimeOptions,
-        logTerminal
-      })
-      if (bot) bot.__logTerminal = logTerminal
-      return bot
+      return createBot(botOptions, runtimeOptions)
     },
-    logTerminal
+    logTerminal: options.logTerminal
   }).catch(err => {
     console.error(err.message)
     process.exitCode = 1

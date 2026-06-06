@@ -114,6 +114,17 @@ function createAutomationManager (bot, options = {}) {
   const wildRoamingAutomation = options.startWildRoamingAutomation || startWildRoamingAutomation
   const pyroFarmingAutomation = options.startPyroFarmingAutomation || startPyroFarmingAutomation
   const miningAutomation = options.startMiningAutomation || startMiningAutomation
+  const memoryOptions = {
+    botId: options.botId,
+    botMemoryRoot: options.botMemoryRoot,
+    memoryPath: options.memoryPath,
+    containerMemoryPath: options.containerMemoryPath,
+    pyroFarmMemoryPath: options.pyroFarmMemoryPath,
+    placesPath: options.placesPath,
+    npcLifePath: options.npcLifePath,
+    missingToolsPath: options.missingToolsPath,
+    debugLogPath: options.debugLogPath
+  }
   let activeAutomation = null
   let pausedNightSafetyAutomation = null
   let waitingNextDayAutomation = null
@@ -122,27 +133,27 @@ function createAutomationManager (bot, options = {}) {
     {
       name: 'Wood cutting',
       resumeAfterNightSafety: true,
-      start: startOptions => woodCuttingAutomation(bot, { output, debugLog, ...startOptions })
+      start: startOptions => woodCuttingAutomation(bot, { ...memoryOptions, output, debugLog, ...startOptions })
     },
     {
       name: 'Farming',
       resumeAfterNightSafety: true,
-      start: startOptions => farmingAutomation(bot, { output, debugLog, ...startOptions })
+      start: startOptions => farmingAutomation(bot, { ...memoryOptions, output, debugLog, ...startOptions })
     },
     {
       name: 'Wild roaming',
       resumeAfterNightSafety: true,
-      start: startOptions => wildRoamingAutomation(bot, { output, debugLog, ...startOptions })
+      start: startOptions => wildRoamingAutomation(bot, { ...memoryOptions, output, debugLog, ...startOptions })
     },
     {
       name: 'Pyro Farming',
       resumeAfterNightSafety: true,
-      start: startOptions => pyroFarmingAutomation(bot, { output, debugLog, ...startOptions })
+      start: startOptions => pyroFarmingAutomation(bot, { ...memoryOptions, output, debugLog, ...startOptions })
     },
     {
       name: 'Mining',
       resumeAfterNightSafety: true,
-      start: startOptions => miningAutomation(bot, { output, debugLog, ...startOptions })
+      start: startOptions => miningAutomation(bot, { ...memoryOptions, output, debugLog, ...startOptions })
     }
   ]
   let lastPeriod = automationPeriod(bot)
