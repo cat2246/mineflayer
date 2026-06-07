@@ -171,7 +171,7 @@ function defaultToolsText () {
     '',
     '- The runtime blocks destructive, moderation, admin, economy-transfer, and permission-changing commands.',
     '- The bot must stay in survival. Do not run server-mode switching commands such as `/hub`, `/lobby`, `/skyblock`, `/sb`, `/oneblock`, `/creative`, `/prison`, `/factions`, `/minigames`, `/bedwars`, `/skywars`, `/duels`, `/vanilla`, or `/server`.',
-    '- Survival-local commands such as `/spawn`, `/warps`, and `/warp <name>` are allowed when otherwise safe.',
+    '- Survival-local informational commands such as `/rules`, `/help`, `/balance`, `/money`, `/spawn`, `/warps`, and `/warp <name>` are allowed when otherwise safe.',
     '- Do not use this for kicking, banning, muting, paying, giving items, deleting homes, or changing server/player permissions.',
     '',
     'Behavior:',
@@ -183,7 +183,7 @@ function defaultToolsText () {
     'Example:',
     '',
     '```json',
-    '{"tool":"run_server_command","args":{"command":"/balance"}}',
+    '{"tool":"run_server_command","args":{"command":"/rules"}}',
     '```',
     '',
     '### record_missing_tool',
@@ -584,6 +584,12 @@ function isMeetAtSpawnRequest (message) {
   const normalized = String(message || '').toLowerCase().replace(/[_-]/g, ' ')
   if (!/\b(spawn)\b/.test(normalized)) return false
   return /\b(meet|come|go|find|follow|visit)\b/.test(normalized)
+}
+
+function isServerRulesRequest (message) {
+  const normalized = String(message || '').toLowerCase().replace(/[_-]/g, ' ')
+  return /\b(rule|rules|allowed|against the rules)\b/.test(normalized) &&
+    /\b(server|this server|here|bot|bots|read|tell|what|show|check|against|allowed)\b/.test(normalized)
 }
 
 function cleanToolResponseText (response) {
@@ -1290,6 +1296,17 @@ async function handleDirectTpaRequest (bot, request, options = {}) {
   return true
 }
 
+async function handleDirectServerRulesRequest (bot, request, options = {}) {
+  if (!isServerRulesRequest(request.message)) return false
+
+  const result = await executeAgentTool(bot, {
+    tool: 'run_server_command',
+    args: { command: '/rules' }
+  }, request, options)
+  await respondToToolResultWithCodex(bot, request, result, options)
+  return true
+}
+
 async function respondToToolResultWithCodex (bot, request, result, options = {}) {
   const debugLog = options.debugLog || (() => {})
   const errorOutput = options.errorOutput || console.error
@@ -1353,6 +1370,7 @@ async function respondWithCodex (bot, request, options) {
 
   if (handleDirectChatCommand(bot, request, options)) return
   if (await handleDirectTpaRequest(bot, request, options)) return
+  if (await handleDirectServerRulesRequest(bot, request, options)) return
 
   try {
     debugLog('aiChat.request', {

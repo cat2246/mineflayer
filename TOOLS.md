@@ -77,7 +77,7 @@ Safety:
 
 - The runtime blocks destructive, moderation, admin, economy-transfer, and permission-changing commands.
 - The bot must stay in survival. Do not run server-mode switching commands such as `/hub`, `/lobby`, `/skyblock`, `/sb`, `/oneblock`, `/creative`, `/prison`, `/factions`, `/minigames`, `/bedwars`, `/skywars`, `/duels`, `/vanilla`, or `/server`.
-- Survival-local commands such as `/spawn`, `/warps`, and `/warp <name>` are allowed when otherwise safe.
+- Survival-local informational commands such as `/rules`, `/help`, `/balance`, `/money`, `/spawn`, `/warps`, and `/warp <name>` are allowed when otherwise safe.
 - Do not use this for kicking, banning, muting, paying, giving items, deleting homes, or changing server/player permissions.
 
 Behavior:
@@ -89,7 +89,7 @@ Behavior:
 Example:
 
 ```json
-{"tool":"run_server_command","args":{"command":"/balance"}}
+{"tool":"run_server_command","args":{"command":"/rules"}}
 ```
 
 ### record_missing_function

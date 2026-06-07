@@ -28,6 +28,16 @@ const SAFE_BUILDING_BLOCK_NAMES = new Set([
   'dark_oak_planks',
   'mangrove_planks',
   'cherry_planks',
+  'oak_log',
+  'spruce_log',
+  'birch_log',
+  'jungle_log',
+  'acacia_log',
+  'dark_oak_log',
+  'mangrove_log',
+  'cherry_log',
+  'crimson_stem',
+  'warped_stem',
   'torch'
 ])
 const PROTECTED_BUILDING_BLOCK_PATTERN = /(chest|barrel|furnace|bed|door|glass|pane|log|wood|leaves|torch|lantern|sign|rail|spawner|water|lava|bedrock)/i
@@ -1150,12 +1160,16 @@ function toolDefinitions () {
         const positions = plannedHomePositions(bot, SIMPLE_SHELTER_OFFSETS, options)
         if (!positions) return { ok: false, reason: 'missing-home' }
         const placed = []
+        const failures = []
         for (const position of positions) {
           const result = await placeBuildingBlock(bot, args.item, position, options)
-          if (result?.ok === false) continue
+          if (result?.ok === false) {
+            failures.push({ position, reason: result.reason, missingIngredients: result.missingIngredients })
+            continue
+          }
           placed.push(result)
         }
-        if (placed.length === 0) return { ok: false, reason: 'no-blocks-placed' }
+        if (placed.length === 0) return { ok: false, reason: 'no-blocks-placed', failures }
         return { placed }
       }
     },
@@ -1167,12 +1181,16 @@ function toolDefinitions () {
         const positions = plannedHomePositions(bot, LIGHT_AREA_OFFSETS, options)
         if (!positions) return { ok: false, reason: 'missing-home' }
         const placed = []
+        const failures = []
         for (const position of positions) {
           const result = await placeBuildingBlock(bot, args.item, position, options)
-          if (result?.ok === false) continue
+          if (result?.ok === false) {
+            failures.push({ position, reason: result.reason, missingIngredients: result.missingIngredients })
+            continue
+          }
           placed.push(result)
         }
-        if (placed.length === 0) return { ok: false, reason: 'no-lights-placed' }
+        if (placed.length === 0) return { ok: false, reason: 'no-lights-placed', failures }
         return { placed }
       }
     },

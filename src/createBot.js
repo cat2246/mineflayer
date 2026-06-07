@@ -196,13 +196,16 @@ function createBot (options = buildBotOptions(), runtimeOptions = {}) {
 
 function start (options = {}) {
   const { startInteractiveMenu } = require('./startMenu')
-  return startInteractiveMenu({
+  const menuOptions = {
     ...options,
     createBot: (botOptions, runtimeOptions = {}) => {
       return createBot(botOptions, runtimeOptions)
-    },
-    logTerminal: options.logTerminal
-  }).catch(err => {
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(options, 'logTerminal')) {
+    menuOptions.logTerminal = options.logTerminal
+  }
+  return startInteractiveMenu(menuOptions).catch(err => {
     console.error(err.message)
     process.exitCode = 1
     return null

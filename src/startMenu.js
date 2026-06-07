@@ -167,11 +167,13 @@ async function startInteractiveMenu (options = {}) {
         env: options.env || process.env,
         serverProfile: selected.serverProfile
       })
-      return createBot(botOptions, {
+      const runtimeOptions = {
         logTerminal: options.logTerminal,
         serverLabel: formatServerLabel(selected.serverProfile),
         serverLoginPassword: selected.serverLoginPassword
-      })
+      }
+      if (!Object.prototype.hasOwnProperty.call(options, 'logTerminal')) delete runtimeOptions.logTerminal
+      return createBot(botOptions, runtimeOptions)
     }
   } finally {
     if (typeof prompt.close === 'function') prompt.close()

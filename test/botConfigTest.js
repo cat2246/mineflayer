@@ -553,12 +553,13 @@ describe('holocraft bot config', function () {
     assert.deepStrictEqual(eventDeltas(null), {})
   })
 
-  it('selects food and night safety goals from current needs', () => {
+  it('selects food and pressure recovery goals from current needs', () => {
     const { chooseNpcGoal, emptyNpcLife } = require('../bot')
     const life = emptyNpcLife({ now: () => 1000 })
 
     assert.strictEqual(chooseNpcGoal(life, { food: 8, isNight: false, unsafe: false }, { now: () => 2000 }).id, 'secure-food')
-    assert.strictEqual(chooseNpcGoal(life, { food: 20, isNight: true, unsafe: false }, { now: () => 3000 }).id, 'stay-safe-until-morning')
+    assert.strictEqual(chooseNpcGoal(life, { food: 20, isNight: true, unsafe: false }, { now: () => 3000 }).id, 'survive-and-settle')
+    assert.strictEqual(chooseNpcGoal(life, { food: 20, isNight: false, unsafe: true }, { now: () => 4000 }).id, 'stand-ground-and-recover')
   })
 
   it('updates NPC life with a selected goal', () => {
@@ -713,6 +714,41 @@ describe('holocraft bot config', function () {
     assert.strictEqual(started[0].botOptions.username, 'OfflineSteve')
     assert.strictEqual(started[0].runtimeOptions.serverLoginPassword, 'secret-password')
     assert.strictEqual(started[0].runtimeOptions.serverLabel, 'localhost:25566')
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(started[0].runtimeOptions, 'logTerminal'), false)
+  })
+
+  it('top-level start does not pass an undefined log terminal into the start menu', async () => {
+    const startMenuPath = require.resolve('../src/startMenu')
+    const createBotPath = require.resolve('../src/createBot')
+    const originalStartMenu = require.cache[startMenuPath]
+    const originalCreateBot = require.cache[createBotPath]
+    let capturedOptions
+
+    require.cache[startMenuPath] = {
+      id: startMenuPath,
+      filename: startMenuPath,
+      loaded: true,
+      exports: {
+        startInteractiveMenu: async options => {
+          capturedOptions = options
+          return { ok: true }
+        }
+      }
+    }
+    delete require.cache[createBotPath]
+
+    try {
+      const { start } = require('../src/createBot')
+      const result = await start()
+
+      assert.deepStrictEqual(result, { ok: true })
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(capturedOptions, 'logTerminal'), false)
+    } finally {
+      delete require.cache[createBotPath]
+      if (originalCreateBot) require.cache[createBotPath] = originalCreateBot
+      if (originalStartMenu) require.cache[startMenuPath] = originalStartMenu
+      else delete require.cache[startMenuPath]
+    }
   })
 
   it('start menu asks for and saves a missing bot/server password before joining', async () => {
@@ -1534,13 +1570,31 @@ describe('holocraft bot config', function () {
     assert.strictEqual(action.weapon.name, 'diamond_sword')
   })
 
-  it('runs away when no suitable combat weapon is available', () => {
+  it('uses barehand melee when no combat weapon is available', () => {
     const { chooseCombatAction } = require('../bot')
     const bot = combatBot([])
 
     const action = chooseCombatAction(bot, combatTarget('zombie', 3))
 
-    assert.strictEqual(action.type, 'flee')
+    assert.strictEqual(action.type, 'sword')
+    assert.strictEqual(action.weapon, null)
+  })
+
+  it('attacks nearby hostile mobs even when unarmed', async () => {
+    const { runCombatTick } = require('../bot')
+    const events = []
+    const target = combatTarget('zombie', 2)
+    const bot = combatBot([], events)
+
+    await runCombatTick(bot, {
+      targetFinder: () => target,
+      randomInt: (min, max) => max,
+      sleep: async () => {},
+      debugLog: () => {}
+    })
+
+    assert(!events.some(event => event[0] === 'equip'))
+    assert.deepStrictEqual(events[events.length - 1], ['attack', 'zombie', false])
   })
 
   it('performs sword combat against a nearby hostile mob', async () => {
@@ -2502,7 +2556,7 @@ describe('holocraft bot config', function () {
     assert.deepStrictEqual(sleeps, [55, 55, 55, 55, 1040])
   })
 
-  it('randomizes flee combat wait when unarmed', async () => {
+  it('aims and attacks instead of fleeing when unarmed', async () => {
     const { runCombatTick } = require('../bot')
     const events = []
     const sleeps = []
@@ -2518,14 +2572,12 @@ describe('holocraft bot config', function () {
 
     assert.deepStrictEqual(events.filter(event => event[0] !== 'lookAt'), [
       ['pathfinderStop'],
-      ['control', 'back', true],
-      ['control', 'jump', true],
-      ['control', 'back', false],
-      ['control', 'jump', false]
+      ['swingArm', 'right', true],
+      ['attack', 'zombie', false]
     ])
     assert.strictEqual(events.filter(event => event[0] === 'lookAt').length, 5)
     assert(events.filter(event => event[0] === 'lookAt').every(event => event[1] === false))
-    assert.deepStrictEqual(sleeps, [55, 55, 55, 55, 1300])
+    assert.deepStrictEqual(sleeps, [55, 55, 55, 55])
   })
 
   it('eats the best safe food when hunger is not full', async () => {
@@ -2757,6 +2809,24 @@ describe('holocraft bot config', function () {
       assert.strictEqual(options.missingToolsPath, memoryOptions.missingToolsPath)
       assert.strictEqual(options.debugLogPath, memoryOptions.debugLogPath)
     }
+  })
+
+  it('passes explicit start options into selected automations', async () => {
+    const { createAutomationManager } = require('../bot')
+    const bot = new EventEmitter()
+    const started = []
+    const automationManager = createAutomationManager(bot, {
+      output: () => {},
+      debugLog: () => {},
+      startWoodCuttingAutomation: (bot, options) => {
+        started.push(options)
+        return { stop: () => {} }
+      }
+    })
+
+    await automationManager.startByIndex(0, { targetWoodCount: 16 })
+
+    assert.strictEqual(started[0].targetWoodCount, 16)
   })
 
   it('prints automation task completion status to the terminal', async () => {
@@ -3961,6 +4031,44 @@ describe('holocraft bot config', function () {
     ])
     assert.strictEqual(requests.length, 2)
     assert.strictEqual(requests[1].toolResult.command, '/balance')
+  })
+
+  it('checks server rules directly before answering rules questions', async () => {
+    const { attachAiChat } = require('../bot')
+    const events = []
+    const requests = []
+    const bot = new EventEmitter()
+    bot.username = 'TestBot123'
+    bot.chat = message => events.push(['chat', message])
+
+    attachAiChat(bot, {
+      agentCommandResultWaitMs: 1,
+      memoryEnabled: false,
+      sleep: async () => {
+        bot.emit('message', 'Rule 1: Be respectful.')
+        bot.emit('message', 'Rule 2: No griefing.')
+      },
+      runCodex: async request => {
+        requests.push(request)
+        assert(request.toolResult)
+        assert.strictEqual(request.toolResult.command, '/rules')
+        assert.deepStrictEqual(request.toolResult.messages, [
+          'Rule 1: Be respectful.',
+          'Rule 2: No griefing.'
+        ])
+        return 'Server rules: be respectful and do not grief.'
+      }
+    })
+
+    bot.emit('chat', 'Alex', 'TestBot, tell me the server rules')
+    await new Promise(resolve => setImmediate(resolve))
+    await new Promise(resolve => setImmediate(resolve))
+
+    assert.deepStrictEqual(events, [
+      ['chat', '/rules'],
+      ['chat', '@Alex Server rules: be respectful and do not grief.']
+    ])
+    assert.strictEqual(requests.length, 1)
   })
 
   it('blocks dangerous server commands and lets Codex explain the refusal', async () => {
@@ -8999,16 +9107,17 @@ describe('holocraft bot config', function () {
 
     rememberPlaceCoordinates(bot, 'home', combatPosition(10, 64, 10), { placesPath })
 
+    const sleeps = []
     const result = await runStartupHomeFlow(bot, {
       debugLog: (event, data) => debugEntries.push([event, data]),
+      homeSettleMs: 300,
       placesPath,
-      sleep: async () => {
-        throw new Error('known home should not wait for rtp landing')
-      }
+      sleep: async ms => sleeps.push(ms)
     })
 
     assert.strictEqual(result.action, 'go_home')
     assert.deepStrictEqual(messages, ['/home home'])
+    assert.deepStrictEqual(sleeps, [300])
     assert(debugEntries.some(([event]) => event === 'startupHome.goHome'))
   })
 
@@ -9035,13 +9144,36 @@ describe('holocraft bot config', function () {
     })
 
     assert.strictEqual(result.action, 'set_home')
-    assert.deepStrictEqual(messages, ['/rtp', '/sethome home'])
-    assert.deepStrictEqual(sleeps, [250])
+    assert.deepStrictEqual(messages, ['/rtp', '/delhome home', '/sethome home'])
+    assert.deepStrictEqual(sleeps, [250, 1000])
     assert.deepStrictEqual(readPlaceCoordinates('home', { placesPath }).position, {
       x: 80,
       y: 71,
       z: -30
     })
+  })
+
+  it('normalizes wilderness commands before sending them', async () => {
+    const { runStartupHomeFlow } = require('../bot')
+    const placesPath = tempPlacesPath()
+    const bot = new EventEmitter()
+    const messages = []
+    bot.username = 'LifeBot'
+    bot.entity = { position: combatPosition(45, 70, -12) }
+    bot.game = { dimension: 'minecraft:overworld' }
+    bot.health = 20
+    bot.food = 20
+    bot.chat = message => messages.push(message)
+
+    const result = await runStartupHomeFlow(bot, {
+      placesPath,
+      rtpSettleMs: 0,
+      sleep: async () => {},
+      wildernessCommand: 'rtp'
+    })
+
+    assert.strictEqual(result.action, 'set_home')
+    assert.deepStrictEqual(messages, ['/rtp', '/delhome home', '/sethome home'])
   })
 
   it('does not set home after rtp when the landing is unsafe', async () => {
@@ -9069,16 +9201,102 @@ describe('holocraft bot config', function () {
     assert.strictEqual(readPlaceCoordinates('home', { placesPath }), null)
   })
 
-  it('runs startup home flow once after survival is joined', async () => {
+  it('falls back to rtp when remembered home is rejected at server spawn', async () => {
+    const { readPlaceCoordinates, rememberPlaceCoordinates, runStartupHomeFlow } = require('../bot')
+    const placesPath = tempPlacesPath()
+    const bot = new EventEmitter()
+    const messages = []
+    const sleeps = []
+    const debugEntries = []
+    bot.username = 'LifeBot'
+    bot.entity = { position: combatPosition(45, 70, -12) }
+    bot.game = { dimension: 'minecraft:overworld' }
+    bot.health = 20
+    bot.food = 20
+    bot.chat = message => {
+      messages.push(message)
+      if (message === '/home home') {
+        process.nextTick(() => bot.emit('message', { toString: () => "You don't have permission!" }))
+      }
+    }
+    rememberPlaceCoordinates(bot, 'home', combatPosition(10, 64, 10), { placesPath })
+
+    const result = await runStartupHomeFlow(bot, {
+      debugLog: (event, data) => debugEntries.push([event, data]),
+      homeSettleMs: 50,
+      placesPath,
+      rtpSettleMs: 75,
+      sleep: async ms => {
+        sleeps.push(ms)
+        if (messages.includes('/rtp')) bot.entity.position = combatPosition(80, 71, -30)
+      }
+    })
+
+    assert.strictEqual(result.action, 'set_home')
+    assert.deepStrictEqual(messages, ['/home home', '/rtp', '/delhome home', '/sethome home'])
+    assert.deepStrictEqual(sleeps, [50, 75, 1000])
+    assert(debugEntries.some(([event]) => event === 'startupHome.homeFailed'))
+    assert.deepStrictEqual(readPlaceCoordinates('home', { placesPath }).position, {
+      x: 80,
+      y: 71,
+      z: -30
+    })
+  })
+
+  it('does not remember a new home when sethome is rejected', async () => {
+    const { readPlaceCoordinates, rememberPlaceCoordinates, runStartupHomeFlow } = require('../bot')
+    const placesPath = tempPlacesPath()
+    const bot = new EventEmitter()
+    const messages = []
+    bot.username = 'LifeBot'
+    bot.entity = { position: combatPosition(45, 70, -12) }
+    bot.game = { dimension: 'minecraft:overworld' }
+    bot.health = 20
+    bot.food = 20
+    bot.chat = message => {
+      messages.push(message)
+      if (message === '/home home') {
+        process.nextTick(() => bot.emit('message', { toString: () => "You don't have permission!" }))
+      }
+      if (message === '/sethome home') {
+        process.nextTick(() => bot.emit('message', { toString: () => "You don't have permission to overwrite existing home location. Remove old one or pick different home name." }))
+      }
+    }
+    rememberPlaceCoordinates(bot, 'home', combatPosition(10, 64, 10), { placesPath })
+
+    const result = await runStartupHomeFlow(bot, {
+      homeSettleMs: 50,
+      placesPath,
+      rtpSettleMs: 75,
+      setHomeSettleMs: 50,
+      sleep: async ms => {
+        if (messages.includes('/rtp')) bot.entity.position = combatPosition(80, 71, -30)
+        await new Promise(resolve => setImmediate(resolve))
+      }
+    })
+
+    assert.strictEqual(result.ok, false)
+    assert.strictEqual(result.reason, 'set-home-failed')
+    assert.deepStrictEqual(messages, ['/home home', '/rtp', '/delhome home', '/sethome home'])
+    assert.deepStrictEqual(readPlaceCoordinates('home', { placesPath }).position, {
+      x: 10,
+      y: 64,
+      z: 10
+    })
+  })
+
+  it('runs startup home flow once per survival spawn and marks survival ready', async () => {
     const { attachStartupHomeFlow } = require('../bot')
     const bot = new EventEmitter()
     const calls = []
     const debugEntries = []
+    const readyEvents = []
+    bot.on('survivalReady', data => readyEvents.push(data))
 
     const controller = attachStartupHomeFlow(bot, {
       debugLog: (event, data) => debugEntries.push([event, data]),
       runStartupHomeFlow: async (receivedBot, options) => {
-        calls.push([receivedBot, options.reason])
+        calls.push([receivedBot, options.reason, options.spawnCount])
         return { ok: true, action: 'noop' }
       }
     })
@@ -9086,12 +9304,19 @@ describe('holocraft bot config', function () {
     bot.emit('survivalJoined', { spawnCount: 1 })
     await new Promise(resolve => setImmediate(resolve))
     bot.emit('survivalJoined', { spawnCount: 2 })
+    bot.emit('survivalJoined', { spawnCount: 2 })
+    await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
-    assert.strictEqual(calls.length, 1)
+    assert.strictEqual(calls.length, 2)
     assert.strictEqual(calls[0][0], bot)
     assert.strictEqual(calls[0][1], 'survival-joined')
+    assert.strictEqual(calls[0][2], 1)
+    assert.strictEqual(calls[1][1], 'survival-joined')
+    assert.strictEqual(calls[1][2], 2)
     assert(debugEntries.some(([event]) => event === 'startupHome.complete'))
+    assert.strictEqual(readyEvents.length, 2)
+    assert.strictEqual(readyEvents[0].action, 'noop')
 
     controller.stop()
   })
@@ -9128,7 +9353,7 @@ describe('holocraft bot config', function () {
     assert.deepStrictEqual(cleared, [])
   })
 
-  it('schedules AI NPC thoughts after spawn and on slow idle ticks', async () => {
+  it('schedules AI NPC thoughts after survival ready and on slow idle ticks', async () => {
     const { attachAiNpcScheduler } = require('../bot')
     const bot = new EventEmitter()
     const calls = []
@@ -9161,6 +9386,9 @@ describe('holocraft bot config', function () {
     assert.strictEqual(intervals[0].unrefCalled, true)
 
     bot.emit('spawn')
+    assert.strictEqual(timeouts.length, 0)
+
+    bot.emit('survivalReady')
     assert.strictEqual(timeouts.length, 1)
     assert.strictEqual(timeouts[0].delayMs, 25)
     assert.strictEqual(timeouts[0].unrefCalled, true)
@@ -9258,7 +9486,7 @@ describe('holocraft bot config', function () {
       spawnDelayMs: 10
     })
 
-    bot.emit('spawn')
+    bot.emit('survivalReady')
     bot.emit('end')
 
     assert.deepStrictEqual(clearedIntervals, intervals)
@@ -9359,7 +9587,7 @@ describe('holocraft bot config', function () {
     assert(prompt.includes('improve-home-routine'))
   })
 
-  it('guides the AI NPC planner to prefer grounded tools over legacy automations', () => {
+  it('guides the AI NPC planner to use automations for visible progress when tools cannot move', () => {
     const { createAiNpcPrompt } = require('../bot')
     const state = {
       bot: { username: 'TestBot123' },
@@ -9374,8 +9602,14 @@ describe('holocraft bot config', function () {
     const allowedInstructions = prompt.slice(allowedStart, rulesStart)
 
     assert(prompt.includes('Prefer registered tools over legacy automations.'))
-    assert(prompt.includes('Legacy automation fallback:'))
-    assert(!allowedInstructions.includes('"action":"start_automation"'))
+    assert(prompt.includes('Do not choose noop merely because it is night'))
+    assert(prompt.includes('Death is recoverable.'))
+    assert(prompt.includes('combat system will fight'))
+    assert(prompt.includes('Observation is not progress.'))
+    assert(prompt.includes('Use start_automation when the NPC needs visible movement or gathering'))
+    assert(!prompt.includes('"tool":"sleep_if_possible"'))
+    assert(prompt.includes('Visible movement/gathering fallback:'))
+    assert(allowedInstructions.includes('"action":"start_automation"'))
     assert(prompt.includes('"action":"start_automation","automation":"Wood cutting","reason":"short reason"}'))
   })
 
@@ -9391,6 +9625,38 @@ describe('holocraft bot config', function () {
     const prompt = createAiNpcPrompt(state)
 
     assert(!prompt.includes('state.life.currentGoal'))
+  })
+
+  it('does not log noisy AI NPC request snapshots', async () => {
+    const { runAiNpcCycle } = require('../bot')
+    const bot = new EventEmitter()
+    const debugEvents = []
+    bot.username = 'TestBot123'
+    bot.health = 20
+    bot.food = 20
+    bot.time = { isDay: true, timeOfDay: 1000 }
+    bot.entity = { position: combatPosition(0, 64, 0) }
+    bot.inventory = { items: () => [] }
+    bot.players = {
+      Steve: { username: 'Steve', entity: { position: combatPosition(1, 64, 0) } }
+    }
+
+    await runAiNpcCycle(bot, {
+      automationManager: {
+        getStatus: () => ({ active: null }),
+        isIdle: () => true,
+        list: () => [{ name: 'Farming' }]
+      },
+      followController: {
+        getStatus: () => ({ followedPlayerName: null }),
+        isIdle: () => true
+      },
+      debugLog: (event, data) => debugEvents.push([event, data]),
+      runPlanner: async () => ({ action: 'noop', reason: 'quiet moment' }),
+      now: () => 1000
+    })
+
+    assert(!debugEvents.some(([event]) => event === 'aiNpc.request'))
   })
 
   it('records AI NPC planner outcomes into NPC life state', async () => {
@@ -9553,6 +9819,92 @@ describe('holocraft bot config', function () {
     assert.strictEqual(result.execution.legacy, true)
   })
 
+  it('uses a small starter wood target when the AI NPC starts wood cutting', async () => {
+    const { runAiNpcCycle } = require('../bot')
+    const bot = new EventEmitter()
+    const started = []
+    bot.username = 'LifeBot'
+    bot.health = 20
+    bot.food = 20
+    bot.time = { isDay: true, timeOfDay: 1000 }
+    bot.entity = { position: combatPosition(0, 64, 0) }
+    bot.players = {}
+    bot.inventory = {
+      emptySlotCount: () => 35,
+      items: () => [{ name: 'oak_log', count: 4 }]
+    }
+
+    const result = await runAiNpcCycle(bot, {
+      automationManager: {
+        getStatus: () => ({ active: null }),
+        isIdle: () => true,
+        list: () => [{ name: 'Wood cutting' }, { name: 'Farming' }],
+        startByIndex: async (index, startOptions) => {
+          started.push([index, startOptions])
+          return true
+        }
+      },
+      followController: {
+        getStatus: () => ({ followedPlayerName: null }),
+        isIdle: () => true
+      },
+      runPlanner: async () => ({ action: 'start_automation', automation: 'Wood cutting', reason: 'starter supplies' })
+    })
+
+    assert.strictEqual(result.execution.startedAutomation, 'Wood cutting')
+    assert.deepStrictEqual(started, [[0, { targetWoodCount: 16 }]])
+  })
+
+  it('rotates progress fallback away from recent wood cutting', async () => {
+    const { emptyNpcLife, runAiNpcCycle } = require('../bot')
+    const bot = new EventEmitter()
+    const started = []
+    bot.username = 'LifeBot'
+    bot.health = 20
+    bot.food = 20
+    bot.time = { isDay: true, timeOfDay: 1000 }
+    bot.game = { gameMode: 'survival', dimension: 'minecraft:overworld' }
+    bot.entity = { position: combatPosition(0, 64, 0) }
+    bot.players = {}
+    bot.inventory = {
+      emptySlotCount: () => 35,
+      items: () => [{ name: 'oak_log', count: 24 }]
+    }
+
+    const result = await runAiNpcCycle(bot, {
+      life: {
+        ...emptyNpcLife({ now: () => 1000 }),
+        recentEvents: [
+          { type: 'automation_started', automation: 'Wood cutting', at: 1000 }
+        ]
+      },
+      automationManager: {
+        getStatus: () => ({ active: null }),
+        isIdle: () => true,
+        list: () => [{ name: 'Wood cutting' }, { name: 'Farming' }, { name: 'Wild roaming' }],
+        startByIndex: async index => {
+          started.push(index)
+          return true
+        }
+      },
+      followController: {
+        getStatus: () => ({ followedPlayerName: null }),
+        isIdle: () => true
+      },
+      runPlanner: async () => ({
+        action: 'tool',
+        tool: 'observe_world',
+        args: {},
+        reason: 'look around again'
+      }),
+      now: () => 2000
+    })
+
+    assert.deepStrictEqual(started, [1])
+    assert.strictEqual(result.instruction.action, 'start_automation')
+    assert.strictEqual(result.instruction.automation, 'Farming')
+  })
+
   it('records AI NPC missing tools into per-bot memory', async () => {
     const { runAiNpcCycle } = require('../bot')
     const missingFunctionsPath = tempMissingFunctionsPath()
@@ -9679,17 +10031,18 @@ describe('holocraft bot config', function () {
         getStatus: () => ({ followedPlayerName: null }),
         isIdle: () => true
       },
-      runPlanner: async () => ({ action: 'run_server_command', command: '/spawn', reason: 'idle stroll' })
+      runPlanner: async () => ({ action: 'run_server_command', command: '/rtp', reason: 'idle stroll' })
     })
 
-    assert.deepStrictEqual(messages, ['/spawn'])
+    assert.deepStrictEqual(messages, ['/rtp'])
     assert.strictEqual(result.execution.ok, true)
-    assert.strictEqual(result.execution.toolResult.command, '/spawn')
+    assert.strictEqual(result.execution.toolResult.command, '/rtp')
   })
 
   it('executes grounded AI NPC tools without starting legacy automations', async () => {
     const { runAiNpcCycle } = require('../bot')
     const bot = new EventEmitter()
+    const debugEvents = []
     bot.username = 'ToolBot'
     bot.health = 20
     bot.food = 20
@@ -9712,6 +10065,7 @@ describe('holocraft bot config', function () {
         getStatus: () => ({ followedPlayerName: null }),
         isIdle: () => true
       },
+      debugLog: (event, data) => debugEvents.push([event, data]),
       runPlanner: async () => ({
         action: 'tool',
         tool: 'inspect_inventory',
@@ -9724,6 +10078,69 @@ describe('holocraft bot config', function () {
     assert.strictEqual(result.execution.ok, true)
     assert.strictEqual(result.execution.tool, 'inspect_inventory')
     assert.strictEqual(result.execution.result.items[0].name, 'oak_log')
+    assert(debugEvents.some(([event, data]) =>
+      event === 'aiNpc.response' &&
+      data.executionResult?.items?.[0]?.name === 'oak_log'
+    ))
+  })
+
+  it('starts progress automation when the AI NPC planner only observes while idle', async () => {
+    const { emptyNpcLife, runAiNpcCycle } = require('../bot')
+    const bot = new EventEmitter()
+    const started = []
+    const debugEvents = []
+    bot.username = 'LifeBot'
+    bot.health = 20
+    bot.food = 20
+    bot.time = { isDay: true, timeOfDay: 1000 }
+    bot.game = { gameMode: 'survival', dimension: 'minecraft:overworld' }
+    bot.entity = { position: combatPosition(0, 64, 0) }
+    bot.players = {}
+    bot.inventory = {
+      emptySlotCount: () => 35,
+      items: () => []
+    }
+
+    const result = await runAiNpcCycle(bot, {
+      life: {
+        ...emptyNpcLife({ now: () => 1000 }),
+        currentGoal: {
+          id: 'improve-home-routine',
+          title: 'Improve the home routine',
+          reason: 'Make visible progress.',
+          priority: 'progress',
+          selectedAt: 1000,
+          suggestedAutomations: ['Farming']
+        }
+      },
+      automationManager: {
+        getStatus: () => ({ active: null }),
+        isIdle: () => true,
+        list: () => [{ name: 'Wood cutting' }, { name: 'Farming' }],
+        startByIndex: async index => {
+          started.push(index)
+          return true
+        }
+      },
+      followController: {
+        getStatus: () => ({ followedPlayerName: null }),
+        isIdle: () => true
+      },
+      debugLog: (event, data) => debugEvents.push([event, data]),
+      runPlanner: async () => ({
+        action: 'tool',
+        tool: 'observe_world',
+        args: {},
+        reason: 'look around again'
+      }),
+      now: () => 1000
+    })
+
+    assert.deepStrictEqual(started, [1])
+    assert.strictEqual(result.instruction.action, 'start_automation')
+    assert.strictEqual(result.instruction.automation, 'Farming')
+    assert.strictEqual(result.execution.startedAutomation, 'Farming')
+    assert(debugEvents.some(([event]) => event === 'aiNpc.observationFallback'))
   })
 
   it('lists initial AI NPC tools from the registry', () => {
@@ -10502,6 +10919,64 @@ describe('holocraft bot config', function () {
     assert(events.some(event => event[0] === 'placeBlock' && event[1] === 'grass_block'))
   })
 
+  it('builds a small shelter with natural logs from wood cutting supplies', async () => {
+    const { executeAiNpcTool, rememberPlaceCoordinates } = require('../bot')
+    const events = []
+    const placesPath = tempPlacesPath()
+    const bot = buildingToolBot(events, [
+      block('grass_block', 1, 64, 0),
+      block('grass_block', -1, 64, 0),
+      block('grass_block', 0, 64, 1),
+      block('grass_block', 0, 64, -1)
+    ])
+    bot.inventory.items = () => [{ name: 'oak_log', type: 17, metadata: 0, count: 16 }]
+    rememberPlaceCoordinates(bot, 'home', combatPosition(0, 64, 0), { placesPath })
+
+    const shelter = await executeAiNpcTool(bot, {
+      tool: 'build_small_shelter',
+      args: { item: 'oak_log', safetyPolicy: 'home_improvement' }
+    }, { placesPath })
+
+    assert.strictEqual(shelter.ok, true)
+    assert(shelter.result.placed.every(placed => placed.item === 'oak_log'))
+  })
+
+  it('reports per-position ingredient blockers when a shelter cannot be built', async () => {
+    const { executeAiNpcTool, rememberPlaceCoordinates } = require('../bot')
+    const placesPath = tempPlacesPath()
+    const bot = buildingToolBot([], [
+      block('grass_block', 1, 64, 0)
+    ])
+    bot.inventory.items = () => []
+    rememberPlaceCoordinates(bot, 'home', combatPosition(0, 64, 0), { placesPath })
+
+    const result = await executeAiNpcTool(bot, {
+      tool: 'build_small_shelter',
+      args: { item: 'cobblestone', safetyPolicy: 'home_improvement' }
+    }, { placesPath })
+
+    assert.strictEqual(result.ok, false)
+    assert.strictEqual(result.reason, 'no-blocks-placed')
+    assert(result.result.failures.some(failure => failure.reason === 'missing-ingredients'))
+  })
+
+  it('reports per-position placement blockers when a shelter has no reference blocks', async () => {
+    const { executeAiNpcTool, rememberPlaceCoordinates } = require('../bot')
+    const placesPath = tempPlacesPath()
+    const bot = buildingToolBot([])
+    bot.inventory.items = () => [{ name: 'cobblestone', type: 4, metadata: 0, count: 8 }]
+    rememberPlaceCoordinates(bot, 'home', combatPosition(0, 64, 0), { placesPath })
+
+    const result = await executeAiNpcTool(bot, {
+      tool: 'build_small_shelter',
+      args: { item: 'cobblestone', safetyPolicy: 'home_improvement' }
+    }, { placesPath })
+
+    assert.strictEqual(result.ok, false)
+    assert.strictEqual(result.reason, 'no-blocks-placed')
+    assert(result.result.failures.some(failure => failure.reason === 'missing-reference-block'))
+  })
+
   it('executes registered AI NPC tools with normalized results', async () => {
     const { executeAiNpcTool, readPlaceCoordinates } = require('../bot')
     const placesPath = tempPlacesPath()
@@ -10626,6 +11101,31 @@ describe('holocraft bot config', function () {
     assert.strictEqual(result.execution.ok, false)
     assert.strictEqual(result.execution.toolResult.blocked, true)
     assert.strictEqual(result.execution.toolResult.reason, 'blocked-dangerous-command')
+  })
+
+  it('blocks spawn commands from idle NPC planner instructions', async () => {
+    const { runAiNpcCycle } = require('../bot')
+    const bot = new EventEmitter()
+    const messages = []
+    bot.username = 'TestBot123'
+    bot.chat = message => messages.push(message)
+
+    const result = await runAiNpcCycle(bot, {
+      automationManager: {
+        getStatus: () => ({ active: null }),
+        isIdle: () => true,
+        list: () => []
+      },
+      followController: {
+        getStatus: () => ({ followedPlayerName: null }),
+        isIdle: () => true
+      },
+      runPlanner: async () => ({ action: 'run_server_command', command: '/spawn', reason: 'wrong recovery' })
+    })
+
+    assert.deepStrictEqual(messages, [])
+    assert.strictEqual(result.execution.ok, false)
+    assert.strictEqual(result.execution.reason, 'spawn-is-not-survival-home')
   })
 
   it('blocks server mode commands from idle NPC planner instructions', async () => {

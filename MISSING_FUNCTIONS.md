@@ -90,3 +90,93 @@ Feature backlog captured by the Minecraft AI NPC when players ask for abilities 
 - Suggested tool/function: `switch_server_mode`
 - Player message: TestBot123 do /hub
 - Resolved: Kept server-mode switching blocked so the bot stays in survival, and added regression coverage for `/hub`-style requests.
+
+<!-- missing-function:9998a3ac81f0c187 -->
+## 2026-06-07T06:35:47.330Z - auto-answer all upcoming HoloQuiz questions
+
+- Requested by: `Ashborn` via `public`
+- Source: `ai-chat`
+- Reason: Player asked the bot to keep answering every upcoming HoloQuiz, but the available quiz tool only handles the next question.
+- Suggested tool/function: `answer_all_holoquiz`
+- Player message: PokiMoki82719 can u answer me all the upcoming holoquiz
+
+<!-- missing-function:59bb4d0ec6bbc964 -->
+## 2026-06-07T06:50:01.004Z - gather logs
+
+- Requested by: `Ashborn` via `public`
+- Source: `ai-chat`
+- Reason: Player asked the bot to go collect wood logs for them.
+- Suggested tool/function: `gather_resource`
+- Player message: PokiMoki82719 can u go and get some log for me
+
+<!-- missing-function:5582145c088ac50e -->
+## 2026-06-07T06:51:22.459Z - move head on command
+
+- Requested by: `Ashborn` via `public`
+- Source: `ai-chat`
+- Reason: Player asked the bot to move its head/look around on request.
+- Suggested tool/function: `look_at_player`
+- Player message: PokiMoki82719 can u move ur head
+
+<!-- missing-function:47274961adcd76e4 -->
+## 2026-06-07T06:59:42.037Z - fight a target player or mob
+
+- Requested by: `alradytaken` via `public`
+- Source: `ai-chat`
+- Reason: Player asked the bot to fight fbk in-game, but no combat tool is available.
+- Suggested tool/function: `attack_target`
+- Player message: @PokiMoki82719 can u fight fbk
+
+<!-- missing-function:86618dc52cabd79a -->
+## 2026-06-07T07:27:32.869Z - mine iron for player
+
+- Requested by: `Nerissa` via `public`
+- Source: `ai-chat`
+- Reason: Player asked the bot to go mining and collect iron for them.
+- Suggested tool/function: `gather_resource`
+- Player message: PokiMoki82719 can you go mining for me i need iron
+
+<!-- missing-function:c52df4ad33651f11 -->
+## 2026-06-07T07:29:20.724Z - auto farm
+
+- Requested by: `Nerissa` via `public`
+- Source: `ai-chat`
+- Reason: Player asked the bot to farm automatically for them.
+- Suggested tool/function: `auto_farm`
+- Player message: PokiMoki82719 can you auto farm
+
+<!-- missing-function:7d1bcbaf59c8019c -->
+## 2026-06-07T07:49:50.599Z - send message to another player
+
+- Requested by: `OkatLuftsul` via `public`
+- Source: `ai-chat`
+- Reason: Player asked the bot to tell Prep that Anniv starts now.
+- Suggested tool/function: `message_player`
+- Player message: PokiMoki82719 can you tell Prep that Anniv starts now
+
+<!-- missing-function:2c65db6474eefdf5 -->
+## 2026-06-07T08:25:22.660Z - gather wood for player
+
+- Requested by: `Akatsuki` via `private`
+- Source: `ai-chat`
+- Reason: Player asked the bot to get some wood, but there is no available tool for gathering or collecting items.
+- Suggested tool/function: `gather_resource`
+- Player message: can you get me some wood
+
+<!-- missing-function:f80322fcb6d4bc93 -->
+## 2026-06-07T08:25:34.495Z - drop held item
+
+- Requested by: `alradytaken` via `public`
+- Source: `ai-chat`
+- Reason: Player asked the bot to drop its axe.
+- Suggested tool/function: `drop_item`
+- Player message: @PokiMoki82719 drop ur axe
+
+<!-- missing-function:91877435f04b06af -->
+## 2026-06-07T08:40:00.513Z - bring a stack of dirt to a player
+
+- Requested by: `alradytaken` via `public`
+- Source: `ai-chat`
+- Reason: Player asked the bot to deliver 64 dirt blocks to them.
+- Suggested tool/function: `deliver_item`
+- Player message: @PokiMoki82719 can u bring me a stack of dirt

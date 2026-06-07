@@ -111,8 +111,8 @@ function attachAiNpcScheduler (bot, controller, options = {}) {
     return timer
   }
 
-  function onSpawn () {
-    scheduleDelayedTrigger('spawn', spawnDelayMs)
+  function onSurvivalReady () {
+    scheduleDelayedTrigger('survival-ready', spawnDelayMs)
   }
 
   function onDeath () {
@@ -137,7 +137,7 @@ function attachAiNpcScheduler (bot, controller, options = {}) {
     }
     pendingTimeouts.clear()
 
-    bot?.removeListener?.('spawn', onSpawn)
+    bot?.removeListener?.('survivalReady', onSurvivalReady)
     bot?.removeListener?.('death', onDeath)
     bot?.removeListener?.('health', onHealth)
   }
@@ -147,7 +147,7 @@ function attachAiNpcScheduler (bot, controller, options = {}) {
     callUnref(idleTimer)
   }
 
-  bot?.on?.('spawn', onSpawn)
+  bot?.on?.('survivalReady', onSurvivalReady)
   bot?.on?.('death', onDeath)
   bot?.on?.('health', onHealth)
   bot?.once?.('end', stop)

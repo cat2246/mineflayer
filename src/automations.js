@@ -193,13 +193,14 @@ function createAutomationManager (bot, options = {}) {
     debugLog('automation.waitForNextDay', { name: automationName(automation.definition) })
   }
 
-  async function startAutomation (automation, debugEvent) {
+  async function startAutomation (automation, debugEvent, startOptions = {}) {
     const active = {
       definition: automation,
       instance: null
     }
     activeAutomation = active
     const instance = await automation.start({
+      ...startOptions,
       onComplete: () => markAutomationComplete(active)
     })
     if (activeAutomation === active) active.instance = instance
@@ -207,7 +208,7 @@ function createAutomationManager (bot, options = {}) {
     return active
   }
 
-  async function startByIndex (index) {
+  async function startByIndex (index, startOptions = {}) {
     const automation = automations[index]
     if (!automation) {
       output('Choose a valid automation number, or type cancel.')
@@ -217,7 +218,7 @@ function createAutomationManager (bot, options = {}) {
     stopAutomationInstance(activeAutomation)
     pausedNightSafetyAutomation = null
     waitingNextDayAutomation = null
-    await startAutomation(automation, 'automation.start')
+    await startAutomation(automation, 'automation.start', startOptions)
     return true
   }
 

@@ -14,6 +14,7 @@ const { readNpcMemorySummary } = require('./npcMemory')
 
 const DEFAULT_AI_NPC_MAX_BUFFER = 1024 * 1024
 const DEFAULT_AI_NPC_CHAT_MAX_LENGTH = 160
+const AI_NPC_STARTER_WOOD_TARGET_COUNT = 16
 
 function roundedNumber (value) {
   return typeof value === 'number' && Number.isFinite(value)
@@ -155,7 +156,7 @@ function createAiNpcPrompt (state) {
   const legacyAutomationFallback = hasLegacyAutomations
     ? [
         '',
-        'Legacy automation fallback:',
+        'Visible movement/gathering fallback:',
         JSON.stringify({
           action: 'start_automation',
           automation: legacyAutomationExample,
@@ -174,20 +175,36 @@ function createAiNpcPrompt (state) {
     '{"action":"noop","reason":"short reason"}',
     '{"action":"tool","tool":"observe_world","args":{},"reason":"short reason"}',
     '{"action":"follow_player","player":"Steve","reason":"short reason"}',
-    '{"action":"run_server_command","command":"/spawn","reason":"short reason"}',
+    '{"action":"run_server_command","command":"/rtp","reason":"short reason"}',
     '{"action":"chat","message":"short chat message","reason":"short reason"}',
     '{"action":"record_missing_tool","capability":"craft items","desiredTool":"craft_item","blockedGoal":"Build shelter","reason":"short reason"}',
+    hasLegacyAutomations
+      ? `{"action":"start_automation","automation":"${legacyAutomationExample}","reason":"short reason"}`
+      : null,
     '',
     'Rules:',
-    '- Choose noop if the state is unsafe, boring, unclear, or already busy.',
+    '- Do not choose noop merely because it is night, hostile mobs may exist, or death is possible.',
+    '- Death is recoverable. Act like a survival player with a life: fight, recover, gather, build, and improve gear over time.',
+    '- If hostile mobs attack, the combat system will fight them; your job is to keep the NPC growing before and after combat.',
     `- Registered tools: ${listAiNpcTools().map(tool => tool.name).join(', ')}.`,
     '- Prefer registered tools over legacy automations.',
+    '- Observation is not progress. Use observe_world only when state.bot.position or state.time is missing.',
+    '- The current state already includes position, time, inventory, players, memory, goals, and automation status.',
+    '- Use start_automation when the NPC needs visible movement or gathering and no registered tool can physically progress the goal.',
+    hasLifeGoal
+      ? '- When state.life.currentGoal.suggestedAutomations names available automations, prefer one of those for progress.'
+      : null,
+    `- Do not keep gathering wood without a concrete building, crafting, or storage reason. A starter wood stock is about ${AI_NPC_STARTER_WOOD_TARGET_COUNT} logs, then diversify.`,
     '- Treat /automation actions as legacy manual/debug controls, not the default autonomy path.',
-    '- Use start_automation only as a last-resort legacy fallback when no registered tool can make progress.',
     '- Use only automation names from state.automations.',
     ...lifeRules,
+    '- Useful survival tool examples:',
+    '{"action":"tool","tool":"eat_food","args":{},"reason":"restore hunger"}',
+    '{"action":"tool","tool":"light_area","args":{"safetyPolicy":"home_improvement"},"reason":"make home safer"}',
+    '{"action":"tool","tool":"build_small_shelter","args":{"item":"cobblestone","safetyPolicy":"home_improvement"},"reason":"make a basic shelter"}',
     '- Do not greet every online player or spam chat.',
     '- Do not run admin, moderation, destructive, permission, economy-transfer, or item-giving commands.',
+    '- Do not use /spawn for normal NPC life. On this server spawn is a lobby or museum world, not the survival home.',
     '- Keep chat messages under 160 characters and human-sounding.',
     '- Pick one small useful action, not a plan with multiple steps.',
     ...legacyAutomationFallback,
@@ -377,6 +394,120 @@ function findAutomationIndex (automationManager, automationName) {
   )
 }
 
+function listedAutomationNames (automationManager) {
+  return typeof automationManager?.list === 'function'
+    ? automationManager.list().map(automation => cleanShortText(automation?.name, 80)).filter(Boolean)
+    : []
+}
+
+function isWoodAutomationName (name) {
+  return cleanShortText(name, 80).toLowerCase() === 'wood cutting'
+}
+
+function isWoodItemName (name = '') {
+  return /_(log|stem|wood|hyphae)$/i.test(name)
+}
+
+function inventoryWoodCount (state) {
+  const items = Array.isArray(state?.inventory?.items) ? state.inventory.items : []
+  return items.reduce((total, item) => {
+    if (!isWoodItemName(item?.name)) return total
+    const count = Number(item.count)
+    return total + (Number.isFinite(count) && count > 0 ? count : 0)
+  }, 0)
+}
+
+function recentAutomationCounts (state) {
+  const counts = new Map()
+  const events = Array.isArray(state?.life?.recentEvents) ? state.life.recentEvents : []
+  for (const event of events.slice(-8)) {
+    if (event?.type !== 'automation_started') continue
+    const key = cleanShortText(event.automation, 80).toLowerCase()
+    if (!key) continue
+    counts.set(key, (counts.get(key) || 0) + 1)
+  }
+  return counts
+}
+
+function uniqueProgressCandidates (suggested, fallbackOrder, availableByKey) {
+  const candidates = []
+  const seen = new Set()
+  for (const name of [...suggested, ...fallbackOrder]) {
+    const key = cleanShortText(name, 80).toLowerCase()
+    const match = availableByKey.get(key)
+    if (!match || seen.has(match.toLowerCase())) continue
+    seen.add(match.toLowerCase())
+    candidates.push(match)
+  }
+  return candidates
+}
+
+function selectProgressAutomation (state, automationManager) {
+  const available = listedAutomationNames(automationManager)
+  if (available.length === 0) return ''
+
+  const availableByKey = new Map(available.map(name => [name.toLowerCase(), name]))
+  const suggested = Array.isArray(state?.life?.currentGoal?.suggestedAutomations)
+    ? state.life.currentGoal.suggestedAutomations
+    : []
+  const fallbackOrder = ['Wood cutting', 'Farming', 'Wild roaming', 'Mining', 'Pyro Farming']
+  const candidates = uniqueProgressCandidates(suggested, fallbackOrder, availableByKey)
+  const woodCount = inventoryWoodCount(state)
+  const recentCounts = recentAutomationCounts(state)
+  const scored = candidates.map((name, index) => {
+    const key = name.toLowerCase()
+    const woodStockPenalty = isWoodAutomationName(name) && woodCount >= AI_NPC_STARTER_WOOD_TARGET_COUNT ? 10 : 0
+    return {
+      name,
+      index,
+      recentCount: recentCounts.get(key) || 0,
+      woodStockPenalty
+    }
+  })
+    .sort((a, b) =>
+      (a.woodStockPenalty - b.woodStockPenalty) ||
+      (a.recentCount - b.recentCount) ||
+      (a.index - b.index)
+    )
+
+  if (scored.length > 0) return scored[0].name
+
+  return available[0]
+}
+
+function aiNpcAutomationStartOptions (instruction, state) {
+  if (!isWoodAutomationName(instruction?.automation)) return {}
+  const currentWood = inventoryWoodCount(state)
+  return {
+    targetWoodCount: Math.max(AI_NPC_STARTER_WOOD_TARGET_COUNT, currentWood)
+  }
+}
+
+function blockedAiNpcServerCommandReason (command) {
+  const normalized = String(command || '').trim().toLowerCase()
+  if (normalized === '/spawn' || normalized.startsWith('/spawn ')) return 'spawn-is-not-survival-home'
+  return null
+}
+
+function shouldConvertObservationToProgress (instruction, execution, state, options = {}) {
+  if (instruction?.action !== 'tool' || instruction.tool !== 'observe_world') return false
+  if (execution?.ok === false) return false
+  if (!state?.bot?.position) return false
+  if (state?.time?.isDay === null && typeof state?.time?.timeOfDay !== 'number') return false
+  if (typeof options.automationManager?.isIdle === 'function' && !options.automationManager.isIdle()) return false
+  return findAutomationIndex(options.automationManager, selectProgressAutomation(state, options.automationManager)) >= 0
+}
+
+function progressFallbackInstruction (state, options = {}) {
+  const automation = selectProgressAutomation(state, options.automationManager)
+  if (!automation) return null
+  return {
+    action: 'start_automation',
+    automation,
+    reason: 'idle NPC should make visible progress instead of only observing'
+  }
+}
+
 async function executeAiNpcInstruction (bot, instruction, options = {}) {
   const debugLog = options.debugLog || (() => {})
   const action = instruction?.action || 'noop'
@@ -406,7 +537,10 @@ async function executeAiNpcInstruction (bot, instruction, options = {}) {
       }
     }
 
-    const started = await automationManager.startByIndex(index)
+    const started = await automationManager.startByIndex(
+      index,
+      aiNpcAutomationStartOptions(instruction, options.aiNpcState)
+    )
     return {
       ok: started === true,
       action,
@@ -431,6 +565,16 @@ async function executeAiNpcInstruction (bot, instruction, options = {}) {
   }
 
   if (action === 'run_server_command') {
+    const blockedReason = blockedAiNpcServerCommandReason(instruction.command)
+    if (blockedReason) {
+      return {
+        ok: false,
+        action,
+        reason: blockedReason,
+        command: instruction.command
+      }
+    }
+
     const result = await executeAgentTool(bot, {
       tool: 'run_server_command',
       args: { command: instruction.command }
@@ -503,13 +647,21 @@ async function runAiNpcCycle (bot, options = {}) {
     ...buildCodexOptions(process.env, { task: 'npc' }),
     ...(options.codex || {})
   })
-  debugLog('aiNpc.request', {
-    players: state.players.length,
-    automations: state.automations.map(automation => automation.name)
-  })
   const response = await runPlanner(state, createAiNpcPrompt(state))
-  const instruction = parseAiNpcInstruction(response)
-  const execution = await executeAiNpcInstruction(bot, instruction, options)
+  let instruction = parseAiNpcInstruction(response)
+  let execution = await executeAiNpcInstruction(bot, instruction, { ...options, aiNpcState: state })
+  const fallbackInstruction = shouldConvertObservationToProgress(instruction, execution, state, options)
+    ? progressFallbackInstruction(state, options)
+    : null
+  if (fallbackInstruction) {
+    debugLog('aiNpc.observationFallback', {
+      fromTool: instruction.tool,
+      automation: fallbackInstruction.automation,
+      reason: instruction.reason
+    })
+    instruction = fallbackInstruction
+    execution = await executeAiNpcInstruction(bot, instruction, { ...options, aiNpcState: state })
+  }
   const lifeEvent = executionLifeEvent(instruction, execution, lifeContext.now)
   if (lifeEvent && typeof options.npcLife?.record === 'function') {
     options.npcLife.record(lifeEvent)
@@ -517,8 +669,12 @@ async function runAiNpcCycle (bot, options = {}) {
   }
   debugLog('aiNpc.response', {
     action: instruction.action,
+    tool: instruction.tool,
+    automation: instruction.automation,
     ok: execution.ok !== false,
-    reason: instruction.reason
+    reason: instruction.reason,
+    executionReason: execution.reason,
+    executionResult: execution.result
   })
 
   return {

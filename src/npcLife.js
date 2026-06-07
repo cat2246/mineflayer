@@ -55,7 +55,7 @@ function defaultGoal (now = Date.now()) {
     reason: 'The NPC is new and needs food, safety, and a sense of home.',
     priority: 'safety',
     selectedAt: now,
-    suggestedAutomations: ['Wood cutting', 'Farming']
+    suggestedAutomations: ['Wood cutting', 'Farming', 'Wild roaming', 'Mining']
   }
 }
 
@@ -228,13 +228,13 @@ function chooseNpcGoal (life, context = {}, options = {}) {
   const now = options.now ? options.now() : Date.now()
   const current = normalizeNpcLife(life, options)
 
-  if (context.unsafe || context.isNight) {
+  if (context.unsafe) {
     return goalFor(
-      'stay-safe-until-morning',
-      'Stay safe until morning',
-      'The world is dangerous right now, so safety comes first.',
-      'safety',
-      [],
+      'stand-ground-and-recover',
+      'Stand ground and recover',
+      'Immediate pressure is part of survival; recover, regear, and keep moving.',
+      'survival',
+      ['Mining', 'Wood cutting', 'Farming'],
       now
     )
   }

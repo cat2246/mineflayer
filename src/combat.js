@@ -350,7 +350,7 @@ function chooseCombatAction (bot, target, options = {}) {
     return { type: 'sword', target, weapon: sword, distance }
   }
 
-  return { type: 'flee', target, distance }
+  return { type: 'sword', target, weapon: sword || null, distance }
 }
 
 function stopPathfinder (bot) {
@@ -369,7 +369,7 @@ async function performSwordAttack (bot, action, options, debugLog) {
   if (waitAction) return waitAction
 
   markCombatBusy(bot)
-  await bot.equip(action.weapon, 'hand')
+  if (action.weapon) await bot.equip(action.weapon, 'hand')
   await aimAtCombatTarget(bot, action.target, options)
   if (!isFacingCombatTarget(bot, action.target, options)) return notFacingAction(action)
   sendLegitimateAttack(bot, action.target)
